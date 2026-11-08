@@ -34,11 +34,41 @@ on:
           - an7581
           - an7583
       profile:
-        description: '机型 profile（见下方机型表，all=该 SoC 全部机型）'
+        description: '机型（常用机型直接选；all=该 SoC 全部机型）'
         required: true
         default: 'fiberhome_hg5585f-ct'
+        type: choice
+        options:
+          # ---- an7581 ----
+          - fiberhome_hg5585f-ct
+          - fiberhome_hg5585f-cu
+          - fiberhome_hg5585f-ct-usb-sfp
+          - fiberhome_hg5585f-cu-usb-sfp
+          - fiberhome_hg5382a
+          - h3c_hm2004-du
+          - nokia_xg-040g-md-ubi
+          - nokia_xg-040g-md-ubi-usb-sfp
+          - nokia_xg-040g-tf-ubi
+          - nokia_valyrian
+          - gemtek_xg2010g
+          - gemtek_w1700k-ubi
+          - unionman_ung00a
+          - znxt_zn504xg-d
+          - znxt_zn515xg-d
+          - quantum_q1000k-ubi
+          - airoha_an7581-evb-multievb
+          # ---- an7583 ----
+          - nokia_xg-040g-mf
+          - nokia_xg-040g-mf-ubi
+          - airoha_an7583-evb-multievb
+          # ---- 全部 ----
+          - all
+      profile_custom:
+        description: '机型（自定义，填了则覆盖上面的选择；一般留空）'
+        required: false
+        default: ''
       config_file:
-        description: '使用的配置文件（留空则不加载，用 workspace 下的 .config）'
+        description: '使用的配置文件（一般留 auto）'
         required: false
         default: 'auto'
       upload_release:
@@ -59,9 +89,9 @@ on:
           - 'true'
 
 # =========================================================
-# 机型表（按 SoC 分组，改机型只改 workflow_dispatch 的 profile 输入）
+# 机型表（与上面 profile 下拉的 options 一一对应，改机型时两处一起改）
 #
-#   an7581:
+#   an7581（17 个）:
 #     airoha_an7581-evb-multievb   gemtek_w1700k-ubi       gemtek_xg2010g
 #     nokia_valyrian               fiberhome_hg5382a      fiberhome_hg5585f-ct
 #     fiberhome_hg5585f-cu         fiberhome_hg5585f-ct-usb-sfp
@@ -69,8 +99,13 @@ on:
 #     unionman_ung00a              h3c_hm2004-du          nokia_xg-040g-md-ubi
 #     nokia_xg-040g-md-ubi-usb-sfp quantum_q1000k-ubi     nokia_xg-040g-tf-ubi
 #
-#   an7583:
+#   an7583（3 个）:
 #     airoha_an7583-evb-multievb   nokia_xg-040g-mf       nokia_xg-040g-mf-ubi
+#
+# ⚠ GitHub 的 choice 下拉不支持「选 an7583 时只显示 3 个」这种联动，
+#   所以下拉里是两个 SoC 的机型全列出来。选错了 soc/profile 组合会在
+#   「环境自检」step 里被拦下并列出该 soc 的可选值。
+# ⚠ 上游新增机型时，这里和 profile.options 都要补，否则下拉里选不到。
 # =========================================================
 
 env:
@@ -86,7 +121,8 @@ env:
   DIY_P2_SH: diy-part2.sh
 
   SOC: ${{ github.event.inputs.soc || 'an7581' }}
-  PROFILE: ${{ github.event.inputs.profile || 'fiberhome_hg5585f-ct' }}
+  # 机型：下拉选择优先，profile_custom 填了则覆盖（用于 all 之外的临时机型）
+  PROFILE: ${{ github.event.inputs.profile_custom || github.event.inputs.profile || 'fiberhome_hg5585f-ct' }}
   CONFIG_NAME: ${{ github.event.inputs.config_file || 'auto' }}
 
   UPLOAD_BIN_DIR: false

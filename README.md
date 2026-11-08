@@ -11,15 +11,21 @@
    - **source**：`pbs05/ponwrt`（上游）或 `fork`（你自己的 ponwrt 镜像）
    - **branch**：源码分支，默认 `master`
    - **soc**：`an7581` 或 `an7583`
-   - **profile**：机型名，见下方机型表；填 `all` = 该 SoC 全部机型
+   - **profile**：**下拉选机型**，全部 20 个机型都在里面；选 `all` = 该 SoC 全部机型
+   - **profile_custom**：一般留空。需要临时编一个下拉里没有的机型时才填，
+     **填了会覆盖上面的选择**
    - **config_file**：`auto` 表示按机型自动挑配置（一般不用改）
 3. 跑完后在 **Releases** 里下载固件，或在本轮 Actions 页面底部下载 Artifacts
 
+> GitHub 的下拉框不支持「选 an7583 时只显示 3 个机型」这种联动，
+> 所以下拉里两个 SoC 的机型是混在一起列的。选错组合会在「环境自检」
+> 这一步被拦下并列出该 SoC 的可选值，不会跑到一半才失败。
+
 ## 机型表
 
-| SoC | profile |
+| SoC | 机型（下拉里都选得到） |
 |---|---|
-| `an7581` | `fiberhome_hg5585f-ct` `fiberhome_hg5585f-cu` `fiberhome_hg5382a`<br>`fiberhome_hg5585f-ct-usb-sfp` `fiberhome_hg5585f-cu-usb-sfp`<br>`h3c_hm2004-du` `gemtek_xg2010g` `gemtek_w1700k-ubi`<br>`nokia_xg-040g-md-ubi` `nokia_xg-040g-md-ubi-usb-sfp` `nokia_xg-040g-tf-ubi`<br>`nokia_valyrian` `unionman_ung00a` `znxt_zn504xg-d` `znxt_zn515xg-d`<br>`quantum_q1000k-ubi` `airoha_an7581-evb-multievb` |
+| `an7581` | `fiberhome_hg5585f-ct` `fiberhome_hg5585f-cu`<br>`fiberhome_hg5585f-ct-usb-sfp` `fiberhome_hg5585f-cu-usb-sfp`<br>`fiberhome_hg5382a` `h3c_hm2004-du`<br>`nokia_xg-040g-md-ubi` `nokia_xg-040g-md-ubi-usb-sfp` `nokia_xg-040g-tf-ubi`<br>`nokia_valyrian` `gemtek_xg2010g` `gemtek_w1700k-ubi`<br>`unionman_ung00a` `znxt_zn504xg-d` `znxt_zn515xg-d`<br>`quantum_q1000k-ubi` `airoha_an7581-evb-multievb` |
 | `an7583` | `nokia_xg-040g-mf` `nokia_xg-040g-mf-ubi`<br>`airoha_an7583-evb-multievb` |
 
 soc 与 profile 必须配套，填错会在「环境自检」这一步直接报错退出，不会跑到一半才失败。

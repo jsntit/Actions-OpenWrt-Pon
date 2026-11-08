@@ -33,19 +33,29 @@ soc 与 profile 必须配套，填错会在「环境自检」这一步直接报�
 | `configs/an7581.config` / `an7583.config` | 基础配置，取自 ponwrt 官方 `configs/`，编译时会收敛为单机型 |
 | `configs/release.config` | 官方发布版的额外包（BBR / cake / tproxy / wireguard 等），自动叠加 |
 | `diy-part1.sh` | feeds update 之前跑：按开关拉取额外插件并修正 po 命名 |
-| `diy-part2.sh` | 配置加载之后跑：改时区、追加固件版本后缀（**不改 LAN 地址**） |
+| `diy-part2.sh` | 配置加载之后跑：**只改时区**，其余全部保持上游（LAN / 主机名 / 主题都不动） |
 | `.config` | 兜底配置（`configs/` 里找不到对应文件时才会用到） |
 
 ## 客制化
+
+### 修改原则：只动必要的
+
+`diy-part2.sh` **只改时区**（`Asia/Shanghai`），其余一律保持上游：
+
+| 项目 | 上游默认 | 本仓库 |
+|---|---|---|
+| 时区 | UTC | **Asia/Shanghai** |
+| 默认 LAN | `192.168.1.1` | 不动 |
+| 主机名 | `OpenWrt` | 不动 |
+| 主题 | argon（ImmortalWrt luci feeds 自带） | 不动 |
+| 固件版本后缀 | 无 | 不加 |
 
 ### 关于默认 LAN 地址
 
 **本仓库不改默认 LAN 地址，保持 ponwrt 上游的 `192.168.1.1`。**
 
-`diy-part2.sh` 只改时区和固件版本后缀，不碰网络配置。上游配置里
-`CONFIG_TARGET_PREINIT_IP="192.168.1.1"`，failsafe 预启动网络也是同一网段。
-
-确实要换成别的网段（比如避开光猫的 `192.168.1.x`），有两条路：
+上游配置里 `CONFIG_TARGET_PREINIT_IP="192.168.1.1"`，failsafe 预启动网络也是
+同一网段。确实要换成别的网段（比如避开光猫的 `192.168.1.x`），有两条路：
 
 - **简单**：在 `diy-part2.sh` 里加一句
   `sed -i 's/192.168.1.1/10.0.0.1/g' package/base-files/files/bin/config_generate`

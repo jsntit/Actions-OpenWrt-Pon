@@ -97,8 +97,6 @@ env:
 
   TZ: Asia/Shanghai
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # 固件版本后缀里显示的作者名，改这里一处即可
-  FW_AUTHOR: qwe
 
 jobs:
   build:

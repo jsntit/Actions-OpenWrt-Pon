@@ -33,24 +33,26 @@ soc 与 profile 必须配套，填错会在「环境自检」这一步直接报�
 | `configs/an7581.config` / `an7583.config` | 基础配置，取自 ponwrt 官方 `configs/`，编译时会收敛为单机型 |
 | `configs/release.config` | 官方发布版的额外包（BBR / cake / tproxy / wireguard 等），自动叠加 |
 | `diy-part1.sh` | feeds update 之前跑：按开关拉取额外插件并修正 po 命名 |
-| `diy-part2.sh` | 配置加载之后跑：改时区、默认 LAN `10.0.0.1`、failsafe 同网段、版本后缀 |
+| `diy-part2.sh` | 配置加载之后跑：改时区、追加固件版本后缀（**不改 LAN 地址**） |
 | `.config` | 兜底配置（`configs/` 里找不到对应文件时才会用到） |
 
 ## 客制化
 
-### 改默认 LAN 地址
+### 关于默认 LAN 地址
 
-`diy-part2.sh` 顶部三个常量，或用环境变量覆盖：
+**本仓库不改默认 LAN 地址，保持 ponwrt 上游的 `192.168.1.1`。**
 
-```bash
-LAN_IP=192.168.5.1 LAN_NETMASK=255.255.255.0 LAN_BROADCAST=192.168.5.255
-```
+`diy-part2.sh` 只改时区和固件版本后缀，不碰网络配置。上游配置里
+`CONFIG_TARGET_PREINIT_IP="192.168.1.1"`，failsafe 预启动网络也是同一网段。
 
-默认 `10.0.0.1/24`，会同时改四处：`config_generate`、`uci-defaults/95-lan-ip`、
-`base-files/Makefile` 的 preinit 默认值、`image-config.in` 的 Kconfig default。
+确实要换成别的网段（比如避开光猫的 `192.168.1.x`），有两条路：
 
-> `95-lan-ip` 只在当前地址仍是出厂 `192.168.1.1`（或空）时才动手，
-> 手动改过网段的机器升级后不会被拽回来。
+- **简单**：在 `diy-part2.sh` 里加一句
+  `sed -i 's/192.168.1.1/10.0.0.1/g' package/base-files/files/bin/config_generate`
+- **完整**：还需要同步 failsafe 的预启动网络，否则进了 failsafe 得把电脑换回
+  `192.168.1.x` 才能连上 —— 要改 `base-files/Makefile` 的 `pi_ip` /
+  `pi_broadcast` 和 `image-config.in` 里 `TARGET_PREINIT_IP` 的 Kconfig default
+  （后者不改的话，光写 `.config` 会被 defconfig 按 default 重算丢掉）。
 
 ### 加插件
 

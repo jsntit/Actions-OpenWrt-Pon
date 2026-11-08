@@ -4,7 +4,18 @@
 
 源码、feeds、机型定义全部来自上游 `pbs05/ponwrt`，本仓库只负责「选机型 → 拉插件 → 编译 → 发 Release」。
 
+一共两个 workflow，各管一件事：
+
+| Workflow | 干什么 | 什么时候用 |
+|---|---|---|
+| **Toolchain Builder** | 只编工具链（约 20~40 分钟），结果存进缓存 | 上游升了 GCC / 改了 `toolchain/`，或者想提前把工具链准备好 |
+| **PonWrt Builder** | 编固件并发布 Release | 平时编固件都走这个 |
+
+工具链编一次可以一直复用，固件构建会自动跳过那一段。两者通过**工具链指纹**对上同一份缓存。
+
 ## 快速开始
+
+### 平时编固件
 
 1. 打开仓库的 **Actions** 页面，左侧选 **PonWrt Builder**
 2. 点 **Run workflow**，填/选这几项：
@@ -17,6 +28,18 @@
    - **config_file**：`auto` 表示按机型自动挑配置（一般不用改）
    - **reuse_toolchain**：`true`（默认）= 工具链没变就直接用缓存；`false` = 强制重编工具链
 3. 跑完后在 **Releases** 里下载固件，或在本轮 Actions 页面底部下载 Artifacts
+
+### 想单独先把工具链编好
+
+1. Actions 页面左侧选 **Toolchain Builder**
+2. 点 **Run workflow**：
+   - **soc**：选哪个都行（工具链与机型无关，`an7581`/`an7583` 结果完全一样）
+   - **force_rebuild**：`false`（默认）= 已经有缓存就直接跳过；`true` = 不管有没有都重编
+3. 编完缓存就存好了，之后跑 **PonWrt Builder** 会自动命中
+
+> ⚠ 请**在默认分支（main）上跑** Toolchain Builder。GitHub 的缓存按分支隔离：
+> 在 main 上存的缓存所有分支都能用，在别的分支上存就只有那个分支能用（等于白编）。
+> workflow 检测到你不是在默认分支跑时会打一条 warning。
 
 > GitHub 的下拉框不支持「选 an7583 时只显示 3 个机型」这种联动，
 > 所以下拉里两个 SoC 的机型是混在一起列的。选错组合会在「环境自检」
@@ -35,8 +58,11 @@ soc 与 profile 必须配套，填错会在「环境自检」这一步直接报�
 
 | 路径 | 作用 |
 |---|---|
-| `.github/workflows/openwrt-builder.yml` | 主构建流程（23 步：拉源码 → feeds → 配置 → 工具链缓存 → 编译 → 发布） |
+| `.github/workflows/openwrt-builder.yml` | **固件构建**（23 步：拉源码 → feeds → 配置 → 工具链缓存 → 编译 → 发布） |
+| `.github/workflows/toolchain-builder.yml` | **工具链构建**（只编 tools/ + 工具链，存缓存，不编固件） |
 | `.github/workflows/update-checker.yml` | 上游有新提交时自动触发构建（默认手动，取消注释 `schedule` 即开启） |
+| `.github/scripts/toolchain-fingerprint.sh` | **工具链指纹算法**，两个 workflow 共用（改这里，不要复制到 yml 里） |
+| `.github/actions/build-env/action.yml` | 编译环境准备（apt 依赖 + 时区 + `/workdir`），两个 workflow 共用 |
 | `configs/an7581.config` / `an7583.config` | 基础配置，取自 ponwrt 官方 `configs/`，编译时会收敛为单机型 |
 | `configs/release.config` | 官方发布版的额外包（BBR / cake / tproxy / wireguard 等），自动叠加 |
 | `diy-part1.sh` | feeds update 之前跑：按开关拉取额外插件并修正 po 命名 |
@@ -89,7 +115,8 @@ OpenWrt 编译里最贵的一段是**工具链**（binutils → gcc → libc →
 `an7581` 和 `an7583` 用的都是同一套 `aarch64_cortex-a53 / musl / gcc-14.4.0`（已实测两个
 config 的 GCC / binutils / libc / suffix 完全一致）。
 
-所以工作流把这段结果缓存起来，靠一个**工具链指纹**判断能不能复用：
+所以这段被单独抽成 **Toolchain Builder** 一个 workflow：只编工具链、只存缓存、不编固件。
+编一次，之后所有固件构建都跳过这一段。靠一个**工具链指纹**判断能不能复用：
 
 ```
 指纹 = gcc版本 - binutils版本 - libc - toolchain/build_version - toolchain/目录内容哈希
@@ -128,10 +155,26 @@ GitHub 每个仓库的缓存总量默认上限 **10 GB**，超了按最久未访
 
 ### 强制重编工具链
 
-两种方式，效果一样：
+三种方式，按场景选：
 
-- **一次性**：Run workflow 时把 `reuse_toolchain` 选成 `false`
-- **永久**：删掉 Actions 页面 **Caches** 里 key 以 `toolchain-` 开头的条目
+| 方式 | 做法 | 适合 |
+|---|---|---|
+| 只重编工具链 | 跑 **Toolchain Builder**，`force_rebuild` 选 `true` | 想先单独验证工具链能不能编过 |
+| 编固件时跳过缓存 | **PonWrt Builder** 里 `reuse_toolchain` 选 `false` | 一次性，不想管缓存 |
+| 彻底清掉 | Actions 页面 **Caches** 里删掉 key 以 `toolchain-` 开头的条目 | 怀疑缓存坏了 |
+
+### 两个 workflow 怎么对上同一份缓存
+
+靠两点，缺一就会「编了但命中不了」：
+
+1. **key 相同** —— 两边都调 `.github/scripts/toolchain-fingerprint.sh` 算指纹
+2. **path 相同** —— 两边都存/取 `/workdir/openwrt/{staging_dir/host,staging_dir/toolchain-*,build_dir/toolchain-*}`
+
+所以**不要**把指纹算法复制进 yml 里。要改就改那个脚本，两个 workflow 自动跟着变。
+
+GitHub 的 cache 是**仓库级共享**的，不同 workflow 之间能直接读到，但按分支隔离：
+在默认分支（main）上存的缓存，所有分支的 workflow 都能 restore；在别的分支上存的，
+只有那个分支能用。这就是为什么 Toolchain Builder 要在 main 上跑。
 
 ## 致谢
 

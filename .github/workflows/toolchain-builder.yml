@@ -1,0 +1,225 @@
+#
+# 单独编译工具链（不编固件）
+#
+# 用途：把最贵的那一段（tools/ + binutils + gcc + libc + 内核头文件，约 20~40 分钟）
+#       单独跑一次，结果存进仓库级 cache。之后固件构建（openwrt-builder.yml）
+#       直接命中缓存跳过这一段。
+#
+# 为什么这两个 workflow 能互通：
+#   GitHub Actions 的 cache 是「仓库级」的 —— 不是按 workflow 隔离。
+#   只要两边用同一份指纹算法（.github/scripts/toolchain-fingerprint.sh），
+#   key 就一致，固件构建能直接 restore 这里存下的东西。
+#
+# 什么时候需要跑：
+#   - 上游升了 GCC / binutils / libc
+#   - 上游改了 toolchain/ 目录里的任何文件
+#   - cache 被驱逐了（7 天未访问 / 超出容量），固件构建提示未命中
+#
+name: Toolchain Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: '编译源码仓库'
+        required: true
+        default: 'pbs05/ponwrt'
+        type: choice
+        options:
+          - pbs05/ponwrt
+          - fork
+      branch:
+        description: 'ponwrt 源码分支'
+        required: true
+        default: 'master'
+      soc:
+        description: '用哪个 SoC 的官方配置（工具链与机型无关，选哪个结果都一样）'
+        required: true
+        default: 'an7581'
+        type: choice
+        options:
+          - an7581
+          - an7583
+      force_rebuild:
+        description: '强制重编（忽略已有缓存）'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+# 查 cache 列表需要 actions:read
+permissions:
+  actions: read
+  contents: read
+
+env:
+  # fork 选项指你自己的 ponwrt 镜像
+  REPO_URL: ${{ github.event.inputs.source == 'fork' && 'https://github.com/jsntit/ponwrt' || 'https://github.com/pbs05/ponwrt' }}
+  REPO_BRANCH: ${{ github.event.inputs.branch || 'master' }}
+  SOC: ${{ github.event.inputs.soc || 'an7581' }}
+  FORCE_REBUILD: ${{ github.event.inputs.force_rebuild || 'false' }}
+  TZ: Asia/Shanghai
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  toolchain:
+    name: 编译工具链
+    # 与固件构建保持同一 runner：工具链产物要和那边的环境完全一致
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: 参数自检
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        echo "=========================================="
+        echo "工具链编译参数"
+        echo "=========================================="
+        echo "源码    : ${REPO_URL} (${REPO_BRANCH})"
+        echo "基准 SoC: ${SOC}"
+        echo "强制重编: ${FORCE_REBUILD}"
+        echo "当前分支: ${GITHUB_REF_NAME}"
+        echo "Runner  : $(lsb_release -ds 2>/dev/null || echo unknown)"
+        echo "=========================================="
+        case "${SOC}" in
+          an7581|an7583) ;;
+          *) echo "::error::不支持的 SoC: ${SOC}"; exit 1 ;;
+        esac
+        if [ ! -e "configs/${SOC}.config" ]; then
+          echo "::error::找不到 configs/${SOC}.config —— 无法确定 GCC 版本"
+          exit 1
+        fi
+
+        # cache 的可见性按分支隔离：一个 run 能读「当前分支」和「默认分支」的 cache。
+        # 所以在默认分支（main）上跑，存下的工具链所有分支都能用；
+        # 在别的分支上跑，只有那个分支能用，等于白编。
+        DEFAULT_BRANCH=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${GITHUB_REPOSITORY}" | jq -r '.default_branch // "main"')
+        echo "默认分支: ${DEFAULT_BRANCH}"
+        if [ "${GITHUB_REF_NAME}" != "${DEFAULT_BRANCH}" ]; then
+          echo "::warning::当前分支不是默认分支 —— cache 只对 ${GITHUB_REF_NAME} 可见，其他分支（含 ${DEFAULT_BRANCH}）用不上。想让大家共用，请在 ${DEFAULT_BRANCH} 上跑。"
+        fi
+
+    - name: 编译环境准备
+      uses: ./.github/actions/build-env
+      with:
+        tz: ${{ env.TZ }}
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        git clone --single-branch -b "$REPO_BRANCH" "$REPO_URL" openwrt
+        cd openwrt
+        echo "上游提交: $(git rev-parse --short HEAD)"
+        git log -1 --pretty=format:'  日期: %ci%n  标题: %s%n'
+
+    - name: Load feeds
+      run: |
+        cd /workdir/openwrt
+        # 工具链本身不依赖 feeds，但这里仍然跑一遍：
+        # 保证 .config 展开结果和固件构建那边完全一致，避免任何细微差异。
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: 载入基准配置
+      run: |
+        cd /workdir/openwrt
+        cp "$GITHUB_WORKSPACE/configs/${SOC}.config" .config
+        echo "✅ 已载入 configs/${SOC}.config"
+        make defconfig
+        echo "--- 工具链参数 ---"
+        grep -E "^CONFIG_(GCC_VERSION|BINUTILS_VERSION|LIBC|TARGET_SUFFIX|ARCH|CPU_TYPE)=" .config
+
+    - name: 计算工具链指纹
+      id: tc
+      run: |
+        # 与固件构建共用同一份脚本 —— 两边的 cache key 必须一致
+        bash "$GITHUB_WORKSPACE/.github/scripts/toolchain-fingerprint.sh" /workdir/openwrt
+
+    - name: 检查是否已有缓存
+      id: check
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        KEY="toolchain-${{ steps.tc.outputs.fingerprint }}"
+        echo "要查的 key: $KEY"
+
+        if [ "$FORCE_REBUILD" = "true" ]; then
+          echo "::notice::已选择强制重编，跳过缓存检查"
+          echo "need_build=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # REST 的 key 参数是「前缀匹配」，所以拿回来还要精确比对
+        CNT=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/caches?key=${KEY}&per_page=100" \
+              | jq -r --arg k "$KEY" '[.actions_caches[]? | select(.key == $k)] | length')
+
+        if [ "${CNT:-0}" -gt 0 ]; then
+          echo "::notice::缓存已存在（$KEY），无需重编。要强制重编请把 force_rebuild 选成 true"
+          echo "need_build=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "::notice::没有找到缓存，开始编译工具链"
+          echo "need_build=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: 编译工具链
+      id: build
+      if: steps.check.outputs.need_build == 'true'
+      run: |
+        cd /workdir/openwrt
+        echo "开始编译 tools/ + toolchain/（$(nproc) 线程）"
+        START=$(date +%s)
+        # 只编 tools 和工具链，不碰 package / target / 固件
+        make -j"$(nproc)" toolchain/compile || make -j1 toolchain/compile || make -j1 V=s toolchain/compile
+        END=$(date +%s)
+        echo "编译耗时: $(( END - START )) 秒"
+        echo "elapsed=$(( END - START ))" >> "$GITHUB_OUTPUT"
+
+        echo "--- 检查完成戳 ---"
+        STAMP=$(ls staging_dir/toolchain-*/stamp/.gcc_final_installed 2>/dev/null || true)
+        if [ -z "$STAMP" ]; then
+          echo "::error::没找到 .gcc_final_installed，工具链可能没编完整，不保存缓存"
+          exit 1
+        fi
+        echo "✅ 完成戳: $STAMP"
+        ls -d staging_dir/toolchain-* build_dir/toolchain-* 2>/dev/null || true
+
+    - name: 保存工具链缓存
+      # 只有「真的编译并成功」才存：跳过时 outcome=skipped，失败时 outcome=failure
+      if: steps.build.outcome == 'success'
+      uses: actions/cache/save@main
+      with:
+        # 三块缺一不可：stamp 在 toolchain-* 里，tools 的 stamp 在 host 里
+        path: |
+          /workdir/openwrt/staging_dir/host
+          /workdir/openwrt/staging_dir/toolchain-*
+          /workdir/openwrt/build_dir/toolchain-*
+        key: toolchain-${{ steps.tc.outputs.fingerprint }}
+
+    - name: 结果汇总
+      if: always()
+      run: |
+        {
+          echo "## 工具链编译结果"
+          echo ""
+          echo "| 项目 | 值 |"
+          echo "|---|---|"
+          echo "| 指纹 | \`${{ steps.tc.outputs.fingerprint }}\` |"
+          echo "| 基准 SoC | \`${SOC}\` |"
+          if [ "${{ steps.check.outputs.need_build }}" = "true" ]; then
+            echo "| 是否重新编译 | 是 |"
+            echo "| 编译耗时 | ${{ steps.build.outputs.elapsed }} 秒 |"
+          else
+            echo "| 是否重新编译 | 否（缓存已存在） |"
+          fi
+          echo ""
+          echo "> 固件构建（PonWrt Builder）会在 \`reuse_toolchain=true\` 时自动命中这个缓存。"
+        } >> "$GITHUB_STEP_SUMMARY"

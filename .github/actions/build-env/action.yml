@@ -1,0 +1,55 @@
+#
+# 编译环境准备（composite action）
+#
+# 被两个 workflow 共用，避免 apt 依赖列表在两处各写一份、将来改漏一处：
+#   .github/workflows/toolchain-builder.yml
+#   .github/workflows/openwrt-builder.yml
+#
+name: 编译环境准备
+description: 安装 PonWrt 编译依赖、设置时区、准备 /workdir
+
+inputs:
+  tz:
+    description: 时区
+    required: false
+    default: Asia/Shanghai
+
+runs:
+  using: composite
+  steps:
+    - name: 安装依赖并准备目录
+      shell: bash
+      env:
+        DEBIAN_FRONTEND: noninteractive
+        # 不能叫 TZ —— 会和系统时区变量撞名
+        TARGET_TZ: ${{ inputs.tz }}
+      run: |
+        set -e
+        # 清掉体积大的预装 SDK，腾出磁盘给编译
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet \
+          /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force || true
+
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y \
+          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext \
+          gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 \
+          libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+          libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
+          libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch \
+          pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons \
+          squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto \
+          xxd zlib1g-dev libgnutls28-dev libjson-c-dev libyaml-dev
+        # 注意：模板原版这行里带 python2.7，24.04 已经没有该包，
+        #       留着会让整条 apt install 直接失败，所以不要加回去。
+
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TARGET_TZ"
+
+        sudo mkdir -p /workdir
+        sudo chown "$USER":"$GROUPS" /workdir
+
+        echo "✅ 编译依赖就绪，时区=$(timedatectl show -p Timezone --value)"
+        df -hT /workdir | tail -1

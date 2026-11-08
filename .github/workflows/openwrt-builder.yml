@@ -79,14 +79,14 @@ on:
         options:
           - 'true'
           - 'false'
-      ignore_cache:
-        description: '忽略缓存强制全量编译'
+      reuse_toolchain:
+        description: '复用工具链（工具链没变就直接沿用缓存，省 20~40 分钟）'
         required: true
-        default: 'false'
+        default: 'true'
         type: choice
         options:
-          - 'false'
           - 'true'
+          - 'false'
 
 # =========================================================
 # 机型表（与上面 profile 下拉的 options 一一对应，改机型时两处一起改）
@@ -128,8 +128,8 @@ env:
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: ${{ github.event.inputs.upload_release || 'true' }}
-  IGNORE_CACHE: ${{ github.event.inputs.ignore_cache || 'false' }}
-  USE_DL_CACHE: true
+  # 复用工具链：true = 工具链没变就吃缓存（默认）；false = 忽略缓存强制重编工具链
+  REUSE_TOOLCHAIN: ${{ github.event.inputs.reuse_toolchain || 'true' }}
 
   TZ: Asia/Shanghai
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -202,16 +202,6 @@ jobs:
         cd openwrt
         echo "上游提交: $(git rev-parse --short HEAD)"
         git log -1 --pretty=format:'  日期: %ci%n  标题: %s%n'
-
-    # dl 缓存：ponwrt 的 dl 目录动辄 3~5G，命中后能省 20~40 分钟
-    - name: Restore dl cache
-      if: env.USE_DL_CACHE == 'true' && env.IGNORE_CACHE != 'true'
-      uses: actions/cache/restore@main
-      with:
-        path: /workdir/openwrt/dl
-        key: dl-${{ env.SOC }}-${{ hashFiles('/workdir/openwrt/include/version.mk') }}-${{ github.run_id }}
-        restore-keys: |
-          dl-${{ env.SOC }}-
 
     - name: Load custom feeds
       run: |
@@ -310,6 +300,89 @@ jobs:
           exit 1
         fi
 
+    # =========================================================
+    # 工具链缓存
+    #
+    # OpenWrt 的工具链只取决于「GCC 版本 + libc + binutils + toolchain/ 目录内容」，
+    # 与机型（TARGET_DEVICE）无关：an7581 和 an7583 用的是同一套
+    # aarch64_cortex-a53 / musl / gcc-14.4.0 工具链。实测两个 config 的
+    # CONFIG_GCC_VERSION / BINUTILS_VERSION / LIBC / TARGET_SUFFIX 完全一致。
+    #
+    # 所以 key 用「工具链指纹」而不是 run_id：
+    #   指纹不变 → 直接命中缓存 → 跳过工具链和 tools 的编译（省 20~40 分钟）
+    #   指纹变了 → 落空 → 正常编译，编完把新的存回去
+    #
+    # 缓存内容 = 三块（缺一不可）：
+    #   staging_dir/host                         tools/ 的 stamp 在这里
+    #   staging_dir/toolchain-*                 工具链本体 + .gcc_final_installed 戳
+    #   build_dir/toolchain-*                   工具链中间产物
+    # stamp 跟着缓存一起回来，make 就认为工具链已完成，不会重编。
+    # =========================================================
+
+    - name: 计算工具链指纹
+      id: tc
+      run: |
+        cd openwrt
+        # 1) 决定性的工具链参数（来自 defconfig 之后的 .config）
+        GCCV=$(grep -E '^CONFIG_GCC_VERSION=' .config | cut -d'"' -f2)
+        BINV=$(grep -E '^CONFIG_BINUTILS_VERSION=' .config | cut -d'"' -f2)
+        LIBC=$(grep -E '^CONFIG_LIBC=' .config | cut -d'"' -f2)
+        SUFFIX=$(grep -E '^CONFIG_TARGET_SUFFIX=' .config | cut -d'"' -f2)
+        BUILDER=$(head -1 toolchain/build_version 2>/dev/null | tr -d '[:space:]')
+        BUILDER=${BUILDER:-0}
+        # 每个值都必须非空，否则指纹会静默退化成残缺串，导致缓存误命中
+        for pair in "GCC_VERSION=$GCCV" "BINUTILS_VERSION=$BINV" "LIBC=$LIBC"; do
+          [ -n "${pair#*=}" ] || { echo "::error::${pair%%=*} 为空，.config 可能没生成好"; exit 1; }
+        done
+
+        # 2) toolchain/ 目录内容指纹：用与上游 toolchain/Makefile 里
+        #    toolchain_hash 相同的手法（按内容 md5，排序后再 md5）
+        TREE_HASH=$(find toolchain -type f ! -path '*/.*' \
+            ! -name '*.orig' ! -name '*.rej' ! -name '*~' \
+            -exec md5sum {} + | awk '{print $1}' | LC_ALL=C sort | md5sum | cut -c1-16)
+        [ -n "$TREE_HASH" ] || { echo "::error::toolchain/ 目录哈希计算失败"; exit 1; }
+
+        # 3) 拼成指纹。机型/包列表刻意不参与 —— 换机型应该继续复用工具链
+        FPRINT="${GCCV}-${BINV}-${LIBC}-${BUILDER}-${TREE_HASH}"
+
+        echo "gcc=${GCCV} binutils=${BINV} libc=${LIBC} build_version=${BUILDER}"
+        echo "toolchain 树指纹=${TREE_HASH}"
+        echo "合并指纹=${FPRINT}"
+        echo "fingerprint=${FPRINT}" >> "$GITHUB_OUTPUT"
+
+        # 工具链目录名 = toolchain-<ARCH>_<CPU>_gcc-<GCCV>_<LIBC>
+        # 只用于日志，方便核对缓存里的目录和预期一致
+        ARCH=$(grep -E '^CONFIG_ARCH=' .config | head -1 | cut -d'"' -f2)
+        CPU=$(grep -E '^CONFIG_CPU_TYPE=' .config | head -1 | cut -d'"' -f2)
+        echo "预期工具链目录: toolchain-${ARCH}_${CPU}_gcc-${GCCV}_${LIBC}"
+
+    - name: 恢复工具链缓存
+      id: tc_cache
+      if: env.REUSE_TOOLCHAIN == 'true'
+      uses: actions/cache/restore@main
+      with:
+        # 三块一起存，stamp 才能跟着回来
+        path: |
+          /workdir/openwrt/staging_dir/host
+          /workdir/openwrt/staging_dir/toolchain-*
+          /workdir/openwrt/build_dir/toolchain-*
+        key: toolchain-${{ steps.tc.outputs.fingerprint }}
+
+    - name: 工具链复用结果
+      run: |
+        if [ "$REUSE_TOOLCHAIN" != "true" ]; then
+          echo "::notice::已选择「不复用工具链」，本次将从头编译工具链（会慢 20~40 分钟）"
+        elif [ "${{ steps.tc_cache.outputs.cache-hit }}" = "true" ]; then
+          echo "::notice::工具链缓存命中（指纹 ${{ steps.tc.outputs.fingerprint }}），跳过工具链编译"
+          ls -d /workdir/openwrt/staging_dir/toolchain-* 2>/dev/null || true
+          ls /workdir/openwrt/staging_dir/toolchain-*/stamp/.gcc_final_installed 2>/dev/null \
+            && echo "✅ 工具链完成戳已恢复" \
+            || echo "::warning::没找到 .gcc_final_installed，工具链可能会重编"
+        else
+          echo "::notice::工具链缓存未命中，本次编译完成后会自动存一份"
+          echo "（指纹 ${{ steps.tc.outputs.fingerprint }}）"
+        fi
+
     - name: Download package
       id: package
       run: |
@@ -330,12 +403,17 @@ jobs:
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> "$GITHUB_ENV"
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
 
-    - name: Save dl cache
-      if: always() && env.USE_DL_CACHE == 'true'
+    - name: Save toolchain cache
+      # 只在「本次真的编了工具链」时才存：
+      # 命中缓存时 steps.tc_cache.outputs.cache-hit == 'true'，存了也是白存（key 已存在）
+      if: always() && env.REUSE_TOOLCHAIN == 'true' && steps.tc_cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@main
       with:
-        path: /workdir/openwrt/dl
-        key: dl-${{ env.SOC }}-${{ hashFiles('/workdir/openwrt/include/version.mk') }}-${{ github.run_id }}
+        path: |
+          /workdir/openwrt/staging_dir/host
+          /workdir/openwrt/staging_dir/toolchain-*
+          /workdir/openwrt/build_dir/toolchain-*
+        key: toolchain-${{ steps.tc.outputs.fingerprint }}
 
     - name: Check space usage
       if: (!cancelled())

@@ -15,6 +15,7 @@
    - **profile_custom**：一般留空。需要临时编一个下拉里没有的机型时才填，
      **填了会覆盖上面的选择**
    - **config_file**：`auto` 表示按机型自动挑配置（一般不用改）
+   - **reuse_toolchain**：`true`（默认）= 工具链没变就直接用缓存；`false` = 强制重编工具链
 3. 跑完后在 **Releases** 里下载固件，或在本轮 Actions 页面底部下载 Artifacts
 
 > GitHub 的下拉框不支持「选 an7583 时只显示 3 个机型」这种联动，
@@ -34,7 +35,7 @@ soc 与 profile 必须配套，填错会在「环境自检」这一步直接报�
 
 | 路径 | 作用 |
 |---|---|
-| `.github/workflows/openwrt-builder.yml` | 主构建流程（21 步：拉源码 → feeds → 配置 → 编译 → 发布） |
+| `.github/workflows/openwrt-builder.yml` | 主构建流程（23 步：拉源码 → feeds → 配置 → 工具链缓存 → 编译 → 发布） |
 | `.github/workflows/update-checker.yml` | 上游有新提交时自动触发构建（默认手动，取消注释 `schedule` 即开启） |
 | `configs/an7581.config` / `an7583.config` | 基础配置，取自 ponwrt 官方 `configs/`，编译时会收敛为单机型 |
 | `configs/release.config` | 官方发布版的额外包（BBR / cake / tproxy / wireguard 等），自动叠加 |
@@ -81,10 +82,56 @@ soc 与 profile 必须配套，填错会在「环境自检」这一步直接报�
 当前默认开启的只有 `luci-app-airoha-npu`（Airoha SoC 状态页）。
 homeproxy / passwall2 / openclash / mosdns / lucky 的开关都在文件里，默认 `false`。
 
-## 缓存
+## 工具链复用（省 20~40 分钟）
 
-`dl` 目录走 `actions/cache`，命中后能省 20~40 分钟。想强制全量重新下载，
-把 **ignore_cache** 选成 `true`。
+OpenWrt 编译里最贵的一段是**工具链**（binutils → gcc → libc → 内核头文件）加上 `tools/`
+那几十个 host 程序，总共 20~40 分钟。但这段产物**只取决于工具链本身**，跟选哪个机型无关：
+`an7581` 和 `an7583` 用的都是同一套 `aarch64_cortex-a53 / musl / gcc-14.4.0`（已实测两个
+config 的 GCC / binutils / libc / suffix 完全一致）。
+
+所以工作流把这段结果缓存起来，靠一个**工具链指纹**判断能不能复用：
+
+```
+指纹 = gcc版本 - binutils版本 - libc - toolchain/build_version - toolchain/目录内容哈希
+例：  14.4.0-2.46.1-musl-1-89ea73fa8d9fca70
+```
+
+| 情况 | 指纹 | 行为 |
+|---|---|---|
+| 换机型（an7581 ↔ an7583、不同 profile） | **不变** | 直接吃缓存，跳过工具链 |
+| 上游改了 `toolchain/` 里任何文件 | 变化 | 缓存落空，重编工具链后自动存新的 |
+| 上游升级 GCC / binutils / libc | 变化 | 同上 |
+| 选 `reuse_toolchain: false` | 不查缓存 | 强制从头编工具链 |
+
+缓存内容是三块，缺一不可：
+
+| 路径 | 为什么必须有 |
+|---|---|
+| `staging_dir/host` | `tools/` 的完成戳 `.tools_compile` 在这里 |
+| `staging_dir/toolchain-*` | 工具链本体，**以及 `.gcc_final_installed` 完成戳** |
+| `build_dir/toolchain-*` | 工具链中间产物 |
+
+> 关键点：完成戳跟着缓存一起回来，`make` 就认为工具链已经编好了，才会真的跳过。
+> 只存 `staging_dir/host` 而不存 `toolchain-*`，戳会丢，工具链照样重编。
+
+### 关于缓存容量
+
+GitHub 每个仓库的缓存总量默认上限 **10 GB**，超了按最久未访问淘汰。
+工具链缓存占 **6~9 GB**，所以**本仓库不再单独缓存 `dl/`**（原来那 3~5 GB 会和工具链
+抢空间，互相驱逐，结果就是「缓存了反而命中不了」）。
+
+代价是每次都要重新 `make download` 拉源码包。但工具链命中省下的时间（20~40 分钟）
+远大于 dl 下载的时间，而且工具链复用后 dl 里那部分工具链源码本来也用不上。
+
+> 如果确实需要 dl 缓存，去 **Settings → Actions → General → Cache size eviction limit**
+> 把上限调大（需 Pro/Team 或有付款方式），再把 dl 缓存那几步加回来。
+
+### 强制重编工具链
+
+两种方式，效果一样：
+
+- **一次性**：Run workflow 时把 `reuse_toolchain` 选成 `false`
+- **永久**：删掉 Actions 页面 **Caches** 里 key 以 `toolchain-` 开头的条目
 
 ## 致谢
 

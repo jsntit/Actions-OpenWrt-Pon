@@ -13,7 +13,8 @@
 name: Update Checker
 
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
+  # 跟随 pbs05/ponwrt 上游；有新的提交时自动触发一次构建
+  REPO_URL: https://github.com/pbs05/ponwrt
   REPO_BRANCH: master
 
 on:
@@ -35,7 +36,7 @@ jobs:
 
     - name: Compare Commit Hash
       id: cacheHash
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: .commitHash
         key: commitHash_${{ steps.getHash.outputs.commitHash }}

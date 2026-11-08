@@ -1,40 +1,139 @@
 #
-# https://github.com/P3TERX/Actions-OpenWrt
+# 基于 P3TERX/Actions-OpenWrt 模板改造，源码指向 pbs05/ponwrt（Airoha AN758x PON）
 #
-# File: .github/workflows/openwrt-bulder.yml
-# Description: Build OpenWrt using GitHub Actions
-#
-# Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
+# File: .github/workflows/openwrt-builder.yml
+# Description: Build PonWrt (Airoha AN7581 / AN7583) using GitHub Actions
 #
 # This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
 #
 
-name: OpenWrt Builder
+name: PonWrt Builder
 
 on:
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      source:
+        description: '编译源码仓库'
+        required: true
+        default: 'pbs05/ponwrt'
+        type: choice
+        options:
+          - pbs05/ponwrt
+          - fork
+      branch:
+        description: 'ponwrt 源码分支'
+        required: true
+        default: 'master'
+      soc:
+        description: 'SoC 平台'
+        required: true
+        default: 'an7581'
+        type: choice
+        options:
+          - an7581
+          - an7583
+      profile:
+        description: '机型 profile（见下方机型表，all=该 SoC 全部机型）'
+        required: true
+        default: 'fiberhome_hg5585f-ct'
+      config_file:
+        description: '使用的配置文件（留空则不加载，用 workspace 下的 .config）'
+        required: false
+        default: 'auto'
+      upload_release:
+        description: '发布到 Release'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      ignore_cache:
+        description: '忽略缓存强制全量编译'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+# =========================================================
+# 机型表（按 SoC 分组，改机型只改 workflow_dispatch 的 profile 输入）
+#
+#   an7581:
+#     airoha_an7581-evb-multievb   gemtek_w1700k-ubi       gemtek_xg2010g
+#     nokia_valyrian               fiberhome_hg5382a      fiberhome_hg5585f-ct
+#     fiberhome_hg5585f-cu         fiberhome_hg5585f-ct-usb-sfp
+#     fiberhome_hg5585f-cu-usb-sfp znxt_zn515xg-d         znxt_zn504xg-d
+#     unionman_ung00a              h3c_hm2004-du          nokia_xg-040g-md-ubi
+#     nokia_xg-040g-md-ubi-usb-sfp quantum_q1000k-ubi     nokia_xg-040g-tf-ubi
+#
+#   an7583:
+#     airoha_an7583-evb-multievb   nokia_xg-040g-mf       nokia_xg-040g-mf-ubi
+# =========================================================
 
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
+  BUILD_ROOT: /workdir
+  # fork 选项指你自己的镜像；上游走 pbs05/ponwrt
+  SOURCE: ${{ github.event.inputs.source || 'pbs05/ponwrt' }}
+  REPO_URL: ${{ github.event.inputs.source == 'fork' && 'https://github.com/jsntit/ponwrt' || 'https://github.com/pbs05/ponwrt' }}
+  REPO_BRANCH: ${{ github.event.inputs.branch || 'master' }}
+
+  FEEDS_CONF: ''
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
+
+  SOC: ${{ github.event.inputs.soc || 'an7581' }}
+  PROFILE: ${{ github.event.inputs.profile || 'fiberhome_hg5585f-ct' }}
+  CONFIG_NAME: ${{ github.event.inputs.config_file || 'auto' }}
+
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
-  UPLOAD_RELEASE: true
+  UPLOAD_RELEASE: ${{ github.event.inputs.upload_release || 'true' }}
+  IGNORE_CACHE: ${{ github.event.inputs.ignore_cache || 'false' }}
+  USE_DL_CACHE: true
+
   TZ: Asia/Shanghai
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # 固件版本后缀里显示的作者名，改这里一处即可
+  FW_AUTHOR: qwe
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    # ponwrt 走 ImmortalWrt 主线（内核 6.18），用 24.04 而非模板默认的 22.04：
+    # 22.04 的 gcc-11 / python3.10 编 6.18 内核与新版 host 工具时会踩坑
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Checkout
       uses: actions/checkout@main
+
+    - name: 环境自检
+      run: |
+        echo "=========================================="
+        echo "PonWrt 构建参数"
+        echo "=========================================="
+        echo "Source    : ${SOURCE} (${REPO_URL})"
+        echo "Branch    : ${REPO_BRANCH}"
+        echo "SoC       : ${SOC}"
+        echo "Profile   : ${PROFILE}"
+        echo "Config    : ${CONFIG_NAME}"
+        echo "Runner    : $(lsb_release -ds 2>/dev/null || echo unknown)"
+        echo "=========================================="
+        # 机型必须属于所选 SoC，否则后面 defconfig 会静默剔除 TARGET_DEVICE
+        case "${SOC}" in
+          an7581) ALLOWED="airoha_an7581-evb-multievb gemtek_w1700k-ubi gemtek_xg2010g nokia_valyrian fiberhome_hg5382a fiberhome_hg5585f-ct fiberhome_hg5585f-cu fiberhome_hg5585f-ct-usb-sfp fiberhome_hg5585f-cu-usb-sfp znxt_zn515xg-d znxt_zn504xg-d unionman_ung00a h3c_hm2004-du nokia_xg-040g-md-ubi nokia_xg-040g-md-ubi-usb-sfp quantum_q1000k-ubi nokia_xg-040g-tf-ubi all" ;;
+          an7583) ALLOWED="airoha_an7583-evb-multievb nokia_xg-040g-mf nokia_xg-040g-mf-ubi all" ;;
+          *) echo "::error::未知 SoC: ${SOC}（只支持 an7581 / an7583）"; exit 1 ;;
+        esac
+        ok=0
+        for d in $ALLOWED; do [ "$d" = "${PROFILE}" ] && ok=1 && break; done
+        if [ "$ok" != "1" ]; then
+          echo "::error::profile '${PROFILE}' 不属于 ${SOC}，可选：$ALLOWED"
+          exit 1
+        fi
 
     - name: Initialization environment
       env:
@@ -43,26 +142,49 @@ jobs:
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
         sudo docker image prune --all --force
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -qq install -y \
+          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext \
+          gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 \
+          libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+          libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
+          libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch \
+          pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons \
+          squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto \
+          xxd zlib1g-dev libgnutls28-dev libjson-c-dev libyaml-dev
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
+        # 24.04 默认没有 python2.7，模板那行里带着它会导致整条 apt 失败，已移除
 
     - name: Clone source code
       working-directory: /workdir
       run: |
         df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        git clone --single-branch -b "$REPO_BRANCH" "$REPO_URL" openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        cd openwrt
+        echo "上游提交: $(git rev-parse --short HEAD)"
+        git log -1 --pretty=format:'  日期: %ci%n  标题: %s%n'
+
+    # dl 缓存：ponwrt 的 dl 目录动辄 3~5G，命中后能省 20~40 分钟
+    - name: Restore dl cache
+      if: env.USE_DL_CACHE == 'true' && env.IGNORE_CACHE != 'true'
+      uses: actions/cache/restore@main
+      with:
+        path: /workdir/openwrt/dl
+        key: dl-${{ env.SOC }}-${{ hashFiles('/workdir/openwrt/include/version.mk') }}-${{ github.run_id }}
+        restore-keys: |
+          dl-${{ env.SOC }}-
 
     - name: Load custom feeds
       run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
+        [ -n "$FEEDS_CONF" ] && [ -e "$FEEDS_CONF" ] && mv "$FEEDS_CONF" openwrt/feeds.conf.default
+        chmod +x "$DIY_P1_SH"
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        "$GITHUB_WORKSPACE/$DIY_P1_SH"
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
@@ -72,31 +194,114 @@ jobs:
 
     - name: Load custom configuration
       run: |
+        # 配置加载优先级：
+        #   1) configs/<profile>.config   按机型的精细配置（自己调过就用这个）
+        #   2) configs/<soc>.config       ponwrt 官方全量配置，机型由下一步收敛
+        #   3) .config                    workspace 根目录的兜底
+        CFG=""
+        if [ "$CONFIG_NAME" = "auto" ]; then
+          if [ -e "configs/${PROFILE}.config" ]; then
+            CFG="configs/${PROFILE}.config"
+          else
+            CFG="configs/${SOC}.config"
+          fi
+        elif [ -n "$CONFIG_NAME" ]; then
+          CFG="$CONFIG_NAME"
+        fi
+
+        if [ -n "$CFG" ] && [ -e "$CFG" ]; then
+          cp "$CFG" openwrt/.config
+          echo "✅ 已加载配置: $CFG"
+        elif [ -e "$CONFIG_FILE" ] && [ "$(wc -l < "$CONFIG_FILE")" -gt 5 ]; then
+          cp "$CONFIG_FILE" openwrt/.config
+          echo "✅ 已加载配置: $CONFIG_FILE（configs/ 下没有 ${CFG}）"
+        else
+          echo "::error::找不到任何可用的配置（configs/${PROFILE}.config、configs/${SOC}.config、.config 都不存在）"
+          exit 1
+        fi
+
+        # release.config：ponwrt 官方发布版的额外包（BBR / cake / tproxy / wireguard 等）
+        # 以追加方式合并，已存在的同名符号以先出现的为准，所以放最后只补缺失项
+        if [ -e configs/release.config ]; then
+          echo "--- 叠加 configs/release.config 的额外包 ---"
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            case "$line" in \#*) continue ;; esac
+            sym="${line%%=*}"
+            grep -q "^${sym}=" openwrt/.config || echo "$line" >> openwrt/.config
+          done < configs/release.config
+        fi
+
         [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
+        chmod +x "$DIY_P2_SH"
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        "$GITHUB_WORKSPACE/$DIY_P2_SH"
+
+    - name: 强制目标平台与机型
+      run: |
+        cd openwrt
+        # ponwrt 自带的 configs/an7581.config 是「多机型一起编」的
+        #（MULTI_PROFILE=y + 12 个 DEVICE=y）。这里按输入的 profile 收敛成单机型。
+        #
+        # ⚠ 只动 DEVICE 相关的三组符号，别用 /^CONFIG_TARGET_/ 一刀切：
+        #   那样会连 CONFIG_TARGET_DEVICE_PACKAGES_* 和 TARGET_OPTIMIZATION
+        #   之类一起删掉，defconfig 重算后可能丢配置。
+        sed -i "/^CONFIG_TARGET_airoha_\|^# CONFIG_TARGET_airoha_/d" .config
+        sed -i "/^CONFIG_TARGET_DEVICE_\|^# CONFIG_TARGET_DEVICE_/d" .config
+        sed -i "/^CONFIG_TARGET_ALL_PROFILES\|^# CONFIG_TARGET_ALL_PROFILES/d" .config
+        sed -i "/^CONFIG_TARGET_MULTI_PROFILE\|^# CONFIG_TARGET_MULTI_PROFILE/d" .config
+        sed -i "/^CONFIG_TARGET_PER_DEVICE_ROOTFS\|^# CONFIG_TARGET_PER_DEVICE_ROOTFS/d" .config
+        {
+          echo "CONFIG_TARGET_airoha=y"
+          echo "CONFIG_TARGET_airoha_${SOC}=y"
+          if [ "${PROFILE}" = "all" ]; then
+            # all = 该 SoC 全部机型，保留多机型构建
+            echo "CONFIG_TARGET_ALL_PROFILES=y"
+            echo "CONFIG_TARGET_MULTI_PROFILE=y"
+            echo "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"
+          else
+            echo "CONFIG_TARGET_ALL_PROFILES=n"
+            echo "CONFIG_TARGET_MULTI_PROFILE=n"
+            echo "CONFIG_TARGET_PER_DEVICE_ROOTFS=n"
+            echo "CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y"
+            echo "CONFIG_TARGET_DEVICE_PACKAGES_airoha_${SOC}_DEVICE_${PROFILE}=\"\""
+          fi
+        } >> .config
+        echo "✅ 已锁定 target: airoha/${SOC}  device: ${PROFILE}"
+        make defconfig
+        echo "--- defconfig 之后的实际选择 ---"
+        grep -E "^CONFIG_TARGET_(airoha|DEVICE|ALL_PROFILES|MULTI_PROFILE)" .config || true
+        if [ "${PROFILE}" != "all" ] && ! grep -q "^CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y" .config; then
+          echo "::error::defconfig 之后机型 ${PROFILE} 没有生效 —— 检查 profile 名是否拼写正确"
+          exit 1
+        fi
 
     - name: Download package
       id: package
       run: |
         cd openwrt
-        make defconfig
         make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+        echo "--- 小于 1KB 的残缺文件（通常是下载失败）---"
+        find dl -size -1024c -exec ls -l {} \; || true
+        find dl -size -1024c -exec rm -f {} \; || true
 
     - name: Compile the firmware
       id: compile
       run: |
         cd openwrt
-        echo -e "$(nproc) thread compile"
+        echo "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
+        echo "status=success" >> "$GITHUB_OUTPUT"
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> "$GITHUB_ENV"
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
+
+    - name: Save dl cache
+      if: always() && env.USE_DL_CACHE == 'true'
+      uses: actions/cache/save@main
+      with:
+        path: /workdir/openwrt/dl
+        key: dl-${{ env.SOC }}-${{ hashFiles('/workdir/openwrt/include/version.mk') }}-${{ github.run_id }}
 
     - name: Check space usage
       if: (!cancelled())
@@ -106,7 +311,7 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: PonWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: openwrt/bin
 
     - name: Organize files
@@ -115,24 +320,30 @@ jobs:
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+        echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
+        echo "status=success" >> "$GITHUB_OUTPUT"
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: PonWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> "$GITHUB_OUTPUT"
+        {
+          echo "PonWrt ${SOC} / ${PROFILE}"
+          echo ""
+          echo "- 源码: ${SOURCE}@${REPO_BRANCH}"
+          echo "- SoC: \`${SOC}\`"
+          echo "- 机型: \`${PROFILE}\`"
+          echo "- 构建: $(date +'%Y-%m-%d %H:%M:%S %Z')"
+        } > release.txt
+        echo "status=success" >> "$GITHUB_OUTPUT"
 
     - name: Upload firmware to release
       uses: softprops/action-gh-release@master
@@ -145,6 +356,7 @@ jobs:
         files: ${{ env.FIRMWARE }}/*
 
     - name: Delete workflow runs
+      if: (!cancelled())
       uses: Mattraks/delete-workflow-runs@main
       with:
         retain_days: 0

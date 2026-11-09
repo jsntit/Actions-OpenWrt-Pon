@@ -50,7 +50,7 @@ clone() {  # clone <url> <dir> [branch]
 # ---------------------------------------------------------
 ADD_AIROHA_NPU=true    # luci-app-airoha-npu：Airoha SoC 状态页（NPU/CPU/Frame Engine/PPE）
 
-# ⚠ 以下三个已经内置到 configs/*.config（=y），feeds 里自带，不需要在这里 clone：
+# 本分支（for-zhangbin）在 configs/*.config 里已经开了的包，feeds 里自带，不需要在这里 clone：
 #     luci-app-frpc      ← immortalwrt/luci，本体 frpc 来自 immortalwrt/packages 的 net/frp
 #     luci-app-zerotier  ← immortalwrt/luci，本体 zerotier 来自 immortalwrt/packages 的 net/zerotier
 #     luci-app-homeproxy ← immortalwrt/luci，依赖 sing-box / firewall4 / kmod-nft-tproxy /

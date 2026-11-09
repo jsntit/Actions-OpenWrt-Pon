@@ -395,7 +395,17 @@ jobs:
     - name: Save toolchain cache
       # 只在「本次真的编了工具链」时才存：
       # 命中缓存时 steps.tc_cache.outputs.cache-hit == 'true'，存了也是白存（key 已存在）
-      if: always() && env.REUSE_TOOLCHAIN == 'true' && steps.tc_cache.outputs.cache-hit != 'true'
+      #
+      # ⚠ 必须再要求「指纹非空」。
+      #   前面的「强制目标平台与机型」一旦失败，后面的「计算工具链指纹」就是
+      #   skipped，steps.tc.outputs.fingerprint 取不到值 → 展开成空串，
+      #   而这里用的是 always()，于是会存出一个 key 为 `toolchain-` 的空缓存
+      #   （实测 12880 字节、只有目录骨架），把分支的缓存命名空间污染掉。
+      if: >-
+        always() && env.REUSE_TOOLCHAIN == 'true'
+        && steps.tc.outcome == 'success'
+        && steps.tc.outputs.fingerprint != ''
+        && steps.tc_cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@main
       with:
         path: |

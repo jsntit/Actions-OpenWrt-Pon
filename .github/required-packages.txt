@@ -1,0 +1,33 @@
+# 本分支 defconfig 之后必须为 =y 的包
+#
+# 语法：
+#   每行一个包名        → defconfig 后必须是 CONFIG_PACKAGE_<name>=y
+#   !name               → 必须**不**启用（防撞车）
+#   # 开头 / 空行        → 忽略
+#
+# 这份清单三分支各不相同，改插件时一起改这里，否则构建会在
+# 「校验关键包」步骤（defconfig 之后、编译之前）直接失败。
+#
+# for-zhangbin = frpc + zerotier + homeproxy + gecoosac(集客AC)
+#                + airoha-npu（状态页，三分支都有）
+
+luci-app-airoha-npu
+luci-app-frpc
+luci-app-zerotier
+luci-app-homeproxy
+sing-box
+
+# 集客 AC：两个目录必须同时在（luci 界面的 LUCI_DEPENDS 依赖 gecoosac
+# 及其 PROVIDES），漏一个依赖就解析失败 → 整包被静默剔除
+luci-app-gecoosac
+gecoosac
+
+# gecoosac 的 Makefile 里写死的 DEPENDS，默认全是 is not set。
+# 少一个 → PACKAGE_gecoosac 及其 UI 一起消失，且 defconfig 不报错。
+openssl-util
+coreutils-timeout
+
+# for-zhangbin 用的是 feeds 原生 tailscale 生态之外的组合，这两个不该出现。
+# 真出现了说明 diy-part1.sh 的开关或 config 被误改。
+!tailscale
+!luci-app-tailscale-community

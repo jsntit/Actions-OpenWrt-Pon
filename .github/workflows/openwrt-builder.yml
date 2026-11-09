@@ -254,22 +254,26 @@ jobs:
         #
         #   出自 scripts/target-metadata.pl（生成 tmp/.config-target.in）：
         #
-        #   (A) choice "Target Profile" 的成员 —— **单选，必须选且只能选一个**
+        #   (A) choice "Target Profile" 的成员 —— 单选
         #         config TARGET_<conf>_<profile_id>
         #       → CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a
-        #       由 `choice ... endchoice` 包住，default 指向该 SoC 的
-        #       default_profile（airoha 是 airoha_an7581-evb-multievb）。
         #
-        #   (B) "Target Devices" 菜单里的选项 —— **多选，depends on TARGET_MULTI_PROFILE**
+        #       ⚠ 关键：choice "Target Profile" 里**还包含 TARGET_MULTI_PROFILE 自己**
+        #         （target-metadata.pl 里 `config TARGET_MULTI_PROFILE` 就写在 choice 内），
+        #         所以 (A) 与本步骤要用的 MULTI_PROFILE=y 是**互斥**的：
+        #           · MULTI_PROFILE=y  → 所有 TARGET_<conf>_<profile> 全变 not set
+        #           · 任一机型 =y      → MULTI_PROFILE 自动变 n
+        #         两者同时写 → kconfig 打
+        #           warning: override: TARGET_MULTI_PROFILE changes choice state
+        #         并把其中一行抹掉。2026-11-09 run 42630582605 就死在这里：
+        #         写了 MULTI_PROFILE=y 又写机型 =y → 机型行被抹 → 校验误报「机型没生效」。
+        #
+        #   (B) "Target Devices" 菜单里的选项 —— 多选，depends on TARGET_MULTI_PROFILE
         #         menuconfig TARGET_DEVICE_<conf>_<profile_id>
         #       → CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a
         #
-        #   单机型构建要动的是 **(A)**。
-        #   原来只写了 (B)，(A) 在 config 里 12 个全是 `is not set` ——
-        #   这是非法 choice 状态，kconfig 只能回落到 default，
-        #   于是 defconfig 后变成
-        #     CONFIG_TARGET_airoha_an7581_DEVICE_airoha_an7581-evb-multievb=y
-        #   然后在 (B) 里 grep `=y` 自然一个都没有 → 报「机型没有生效」。
+        #   所以单机型走 (B)：MULTI_PROFILE=y + 只勾这一台。
+        #   此时 (A) 必然是 not set —— **不要写它，也不要校验它**。
         # ============================================================
         #
         # 另外 `CONFIG_TARGET_airoha=y` 这条**必须**一起删掉再统一追加：
@@ -318,16 +322,29 @@ jobs:
             echo "CONFIG_TARGET_MULTI_PROFILE=y"
             echo "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"
           else
-            # 单机型：choice (A) 照旧写目标机型，保证 kconfig 的选择状态合法；
-            # 但 (B) 的机制**必须保留** —— 见上面 ★：(B) 才是「编哪台设备」的开关，
-            # 也是 DEVICE_PACKAGES 合进 rootfs 的前提。
-            echo "CONFIG_TARGET_airoha_${SOC}_DEVICE_${PROFILE}=y"
+            # ★ 这里**不能**写 CONFIG_TARGET_<soc>_DEVICE_<profile>=y。
+            #
+            #   target-metadata.pl 里 choice "Target Profile" 是这样生成的：
+            #     choice
+            #       prompt "Target Profile"
+            #       default TARGET_MULTI_PROFILE if BUILDBOT
+            #     config TARGET_MULTI_PROFILE
+            #       bool "Multiple devices"
+            #   —— TARGET_MULTI_PROFILE 本身就是这个 choice 的成员。
+            #   先写 MULTI_PROFILE=y 再写机型 =y，两者抢同一个 choice，
+            #   kconfig 会打：
+            #     warning: override: TARGET_MULTI_PROFILE changes choice state
+            #   并把机型那行抹成 not set。2026-11-09 run 42630582605 就是这么挂的。
+            #
+            #   单机型只靠 (B) 就够：image.mk:570 的 DEVICE_CHECK_PROFILE 在
+            #   MULTI_PROFILE=y 时只读 CONFIG_TARGET_DEVICE_*，没勾中的机型
+            #   _PROFILE_SET 为空 → _TARGET = install-disabled，不会编进去。
             echo "CONFIG_TARGET_ALL_PROFILES=n"
             echo "CONFIG_TARGET_MULTI_PROFILE=y"
             echo "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"
-            # (B) 里只勾这一台，其余机型天然不编（_PROFILE_SET 为空 → install-disabled）
+            # (B) 里只勾这一台
             echo "CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y"
-            # 清空 per-device 的包覆盖，让 image/*.mk 的 DEVICE_PACKAGES 生效
+            # 清空 per-device 的包覆盖，让 image/*.mk 的 DEVICE_PACKAGES 原样生效
             echo "CONFIG_TARGET_DEVICE_PACKAGES_airoha_${SOC}_DEVICE_${PROFILE}=\"\""
           fi
         } >> .config
@@ -349,24 +366,31 @@ jobs:
         done
 
         echo "✅ 已锁定 target: airoha/${SOC}  device: ${PROFILE}（choice 成员：CONFIG_TARGET_airoha_${SOC}_DEVICE_${PROFILE}）"
-        make defconfig
+        # defconfig 输出留档：后面要检查有没有 choice state 冲突。
+        # `set -e` 下用 || 显式处理，避免失败被吞掉。
+        DC_LOG="${RUNNER_TEMP}/defconfig.log"
+        if ! make defconfig > "${DC_LOG}" 2>&1; then
+          echo "::error::make defconfig 失败"
+          tail -80 "${DC_LOG}" | sed 's/^/::error::  /'
+          exit 1
+        fi
+        grep -E "^(CONFIG_|# CONFIG_)" "${DC_LOG}" >/dev/null 2>&1 || true
+        tail -5 "${DC_LOG}"
         echo "--- defconfig 之后的实际选择 ---"
-        grep -E "^CONFIG_TARGET_(airoha|DEVICE|ALL_PROFILES|MULTI_PROFILE)" .config || true
+        grep -E "^CONFIG_TARGET_(airoha|DEVICE|ALL_PROFILES|MULTI_PROFILE|PER_DEVICE_ROOTFS)" .config || true
+
+        # 任何 "changes choice state" 都说明 .config 里给同一个 choice 写了两个成员。
+        # 这种冲突 kconfig 只 warning 不报错，代价是符号被静默抹掉 —— 必须拦下。
+        if grep -q "changes choice state" "${DC_LOG}"; then
+          echo "::error::defconfig 出现 choice state 冲突（同一 choice 写了多个成员）"
+          grep -n -B2 "changes choice state" "${DC_LOG}" | sed 's/^/::error::  /'
+          echo "::error::常见原因：同时写了 CONFIG_TARGET_MULTI_PROFILE=y 和 CONFIG_TARGET_<soc>_DEVICE_<profile>=y"
+          exit 1
+        fi
 
         if [ "${PROFILE}" != "all" ]; then
-          # 校验要看 choice (A)：CONFIG_TARGET_<soc>_DEVICE_<profile>=y
-          if ! grep -q "^CONFIG_TARGET_airoha_${SOC}_DEVICE_${PROFILE}=y" .config; then
-            echo "::error::defconfig 之后机型 ${PROFILE} 没有生效"
-            echo "::error::实际选中的 choice 成员:"
-            grep -oE "^CONFIG_TARGET_airoha_[A-Za-z0-9]+_DEVICE_[A-Za-z0-9_.-]+=y" .config | sed 's/^/::error::  /' || true
-            echo "::error::若上面是 airoha_an7581-evb-multievb，说明 choice 回落到该 SoC 的 default_profile ——"
-            echo "::error::即 CONFIG_TARGET_airoha_${SOC}_DEVICE_${PROFILE}=y 没被识别，检查 profile 名拼写"
-            exit 1
-          fi
-          echo "✅ choice (A) 命中: CONFIG_TARGET_airoha_${SOC}_DEVICE_${PROFILE}=y"
-
-          # 设备包能否合并进 rootfs，取决于下面三个符号。
-          # 任何一个被 defconfig 重置，固件就会悄悄少驱动 —— 必须硬校验。
+          # 设备包能否合并进 rootfs，取决于下面两个符号。任何一个被 defconfig
+          # 重置，固件就会悄悄少驱动 —— 必须硬校验。
           if ! grep -q "^CONFIG_TARGET_MULTI_PROFILE=y" .config; then
             echo "::error::MULTI_PROFILE 没生效，设备选择与设备包合并都会失效"
             exit 1
@@ -375,14 +399,28 @@ jobs:
             echo "::error::PER_DEVICE_ROOTFS 没生效，image/*.mk 的 DEVICE_PACKAGES 会被丢弃"
             exit 1
           fi
+
+          # 单机型在 MULTI_PROFILE=y 下由 (B) 决定编哪台。
+          # choice (A) CONFIG_TARGET_<soc>_DEVICE_<profile> 此时必然是 not set，
+          # 不要再校验它（那是 42630582605 失败的直接原因）。
           if ! grep -q "^CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y" .config; then
-            echo "::error::(B) 设备选择没生效: CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}"
-            echo "::error::实际命中的设备:"
+            echo "::error::设备没被选中: CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y"
+            echo "::error::实际勾中的设备:"
             grep -oE "^CONFIG_TARGET_DEVICE_airoha_[A-Za-z0-9]+_DEVICE_[A-Za-z0-9_.-]+=y" .config \
               | sed 's/^/::error::  /' || true
+            echo "::error::上面没有输出时，多半是 PROFILE 名与 image/${SOC}.mk 里 define Device/<name> 不一致"
             exit 1
           fi
-          echo "✅ MULTI_PROFILE=y / PER_DEVICE_ROOTFS=y / (B) 命中 —— DEVICE_PACKAGES 会合进 rootfs"
+
+          # 反向校验：只允许这一台。多勾了会一起编，白烧 runner。
+          EXTRA=$(grep -oE "^CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_[A-Za-z0-9_.-]+=y" .config \
+            | sed 's/.*_DEVICE_//; s/=y$//' | grep -vx "${PROFILE}" || true)
+          if [ -n "${EXTRA}" ]; then
+            echo "::error::除 ${PROFILE} 外还勾中了: ${EXTRA}（会被一起编进固件）"
+            exit 1
+          fi
+
+          echo "✅ MULTI_PROFILE=y / PER_DEVICE_ROOTFS=y / (B) 命中 ${PROFILE} —— DEVICE_PACKAGES 会合进 rootfs"
         else
           echo "✅ 多机型模式（all）：MULTI_PROFILE=y"
         fi

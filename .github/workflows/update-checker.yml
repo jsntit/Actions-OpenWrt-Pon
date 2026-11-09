@@ -2,7 +2,7 @@
 # https://github.com/P3TERX/Actions-OpenWrt
 #
 # File: .github/workflows/update-checker.yml
-# Description: Source code update checker
+# Description: Source code update checker（只提醒，不自动构建）
 #
 # Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
 #
@@ -13,18 +13,29 @@
 name: Update Checker
 
 env:
-  # 跟随 pbs05/ponwrt 上游；有新的提交时自动触发一次构建
+  # 跟随 pbs05/ponwrt 上游；有新的提交时只发提醒，不自动触发构建
   REPO_URL: https://github.com/pbs05/ponwrt
   REPO_BRANCH: master
 
 on:
   workflow_dispatch:
-#  schedule:
-#    - cron: 0 */18 * * *
+  schedule:
+    # 每 6 小时检查一次。cron 用 UTC，`0 */6 * * *` = UTC 0/6/12/18 点。
+    # ⚠ schedule 只在默认分支（main）上的 workflow 文件生效。
+    - cron: 0 */6 * * *
+
+# 最小权限：本工作流只做「读上游 + 读缓存」，不写仓库、不发 dispatch、
+# 不删运行记录，所以 contents: read 就够。
+# （上一版因为要发 repository_dispatch 才需要 contents: write，现已去掉。）
+permissions:
+  contents: read
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # 钉版本而不是 ubuntu-latest：
+    #   ubuntu-latest 2026-11 起正在切 Ubuntu 26.04（实测某个 run 跑在 26.04.1 上），
+    #   而两个编译 workflow 钉的是 ubuntu-24.04。这里只用 git + API，钉住更可控。
+    runs-on: ubuntu-24.04
 
     steps:
 
@@ -32,7 +43,13 @@ jobs:
       id: getHash
       run: |
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH .
-        echo "commitHash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+        HASH=$(git rev-parse HEAD)
+        echo "commitHash=$HASH" >> "$GITHUB_OUTPUT"
+        echo "shortHash=${HASH:0:8}" >> "$GITHUB_OUTPUT"
+        echo "上游 $REPO_BRANCH = $HASH"
+        # 拿一下提交摘要，写进 Summary 方便判断这次更新值不值得跟
+        echo "subject=$(git log -1 --pretty=%s)" >> "$GITHUB_OUTPUT"
+        echo "date=$(git log -1 --pretty=%cI)" >> "$GITHUB_OUTPUT"
 
     - name: Compare Commit Hash
       id: cacheHash
@@ -41,20 +58,61 @@ jobs:
         path: .commitHash
         key: commitHash_${{ steps.getHash.outputs.commitHash }}
 
+    # ⚠ 这里刻意「不」发 repository_dispatch。
+    #
+    # 原因：repository_dispatch 只能触发默认分支（main）上的 workflow，API 没有
+    # 指定 ref 的选项。而本仓库的三条分支是：
+    #   main          = 纯上游镜像 + 无插件（纯净基线）
+    #   for-zhangbin  = frpc + zerotier + homeproxy + gecoosac
+    #   for-maym      = homeproxy + tailscale-community
+    # 自动构建只可能打到 main，产出的是不带插件的固件，对你没实际用处；
+    # 反而每次上游更新都白烧一次 Actions 时长（main 一编就是 1 小时起）。
+    #
+    # 所以这里改成：检测到新提交 → 写 Summary + 打一条 ⚠️ warning 注解，
+    # 由人工去 Actions 页面手动挑分支触发 PonWrt Builder。
     - name: Save New Commit Hash
       if: steps.cacheHash.outputs.cache-hit != 'true'
+      env:
+        COMMIT_HASH: ${{ steps.getHash.outputs.commitHash }}
       run: |
-        echo ${{ steps.getHash.outputs.commitHash }} | tee .commitHash
+        echo "${COMMIT_HASH}" | tee .commitHash
 
-    - name: Trigger build
+    - name: Report update
       if: steps.cacheHash.outputs.cache-hit != 'true'
-      uses: peter-evans/repository-dispatch@v2
-      with:
-        token: ${{ github.token }}
-        event-type: Source Code Update
+      # 提交标题由第三方仓库控制，可能含反引号 / $ / 引号。
+      # 一律通过 env 传入，绝不能直接展开进 run 的脚本正文里。
+      env:
+        COMMIT_HASH: ${{ steps.getHash.outputs.commitHash }}
+        SHORT_HASH: ${{ steps.getHash.outputs.shortHash }}
+        COMMIT_DATE: ${{ steps.getHash.outputs.date }}
+        COMMIT_SUBJECT: ${{ steps.getHash.outputs.subject }}
+      run: |
+        {
+          echo "## ⚠️ ponwrt 上游有新的提交"
+          echo ""
+          echo "| 项 | 值 |"
+          echo "| --- | --- |"
+          echo "| 上游 | \`${REPO_URL}\` / \`${REPO_BRANCH}\` |"
+          echo "| 新提交 | \`${COMMIT_HASH}\` |"
+          echo "| 提交时间 | \`${COMMIT_DATE}\` |"
+          echo "| 摘要 | ${COMMIT_SUBJECT//|/\\|} |"
+          echo ""
+          echo "本工作流**不会**自动构建：\`repository_dispatch\` 只能打到默认分支 main，"
+          echo "而 main 是不带插件的纯净基线。请手动触发："
+          echo ""
+          echo "- [PonWrt Builder](../../actions/workflows/openwrt-builder.yml) — 选分支 + 机型"
+          echo "- [Toolchain Builder](../../actions/workflows/toolchain-builder.yml) — 上游换了大版本时先编工具链"
+        } >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 0
-        keep_minimum_runs: 2
+        echo "::warning title=ponwrt 上游有更新::新提交 ${SHORT_HASH} — ${COMMIT_SUBJECT}。请手动触发 PonWrt Builder（自动构建只打 main，不带插件）。"
+
+    - name: Report no change
+      if: steps.cacheHash.outputs.cache-hit == 'true'
+      env:
+        COMMIT_HASH: ${{ steps.getHash.outputs.commitHash }}
+      run: |
+        {
+          echo "## ✅ 上游无变化"
+          echo ""
+          echo "\`${COMMIT_HASH}\` 已经构建过，跳过。"
+        } >> "$GITHUB_STEP_SUMMARY"

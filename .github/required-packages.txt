@@ -1,0 +1,33 @@
+# 本分支 defconfig 之后必须为 =y 的包
+#
+# 语法：
+#   每行一个包名        → defconfig 后必须是 CONFIG_PACKAGE_<name>=y
+#   !name               → 必须**不**启用（防撞车）
+#   # 开头 / 空行        → 忽略
+#
+# 这份清单三分支各不相同，改插件时一起改这里，否则构建会在
+# 「校验关键包」步骤（defconfig 之后、编译之前）直接失败。
+#
+# for-maym = homeproxy + tailscale(whzhni1 界面) + airoha-npu
+
+luci-app-airoha-npu
+luci-app-homeproxy
+sing-box
+
+# tailscale 走 whzhni1/luci-app-tailscale：自带 /etc/init.d/tailscale 与
+# /etc/config/tailscale，二进制由插件首次开启时自己下（update.sh ensure-core）。
+# 它的 LUCI_DEPENDS 里有 +curl，curl 关着整个插件会被 defconfig 静默剔除，
+# 所以 curl / libcurl 必须一起校验。
+luci-app-tailscale
+curl
+libcurl
+
+# homeproxy 的透明代理依赖
+kmod-tun
+ca-bundle
+
+# ⚠ 必须**不**启用：这两个都装 /etc/init.d/tailscale + /etc/config/tailscale，
+# 与 whzhni1 版抢同一批文件（构建期后者静默覆盖前者，运行期行为不可预期）。
+# 详见 diy-part1.sh 里的说明。
+!tailscale
+!luci-app-tailscale-community

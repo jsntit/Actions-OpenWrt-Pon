@@ -180,7 +180,7 @@ jobs:
       #
       #   无条件恢复：命中就省时间；没命中 restore 也只是 no-op
       #   （fail-on-cache-miss 默认 false）。
-      uses: actions/cache/restore@main
+      uses: actions/cache/restore@v5
       with:
         # 与 openwrt-builder.yml 的 restore 逐项一致，否则固件构建永远命不中
         path: |
@@ -242,7 +242,7 @@ jobs:
         success()
         && steps.build.outcome != 'failure'
         && (steps.build.outcome == 'success' || steps.restore.outputs.cache-hit == 'true')
-      uses: actions/cache/save@main
+      uses: actions/cache/save@v5
       with:
         # 四块缺一不可：
         #   stamp 在 toolchain-*/ 和 host/stamp/ 里；

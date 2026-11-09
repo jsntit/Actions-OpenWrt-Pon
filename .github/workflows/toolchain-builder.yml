@@ -147,7 +147,9 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        KEY="toolchain-${{ steps.tc.outputs.fingerprint }}"
+        # ⚠ 必须和 restore/save 用同一个 key 前缀（v2），
+        #   否则这条会看到旧版 v1 存在 → 判定「无需重编」→ v2 永远建不起来。
+        KEY="toolchain-v2-${{ steps.tc.outputs.fingerprint }}"
         echo "要查的 key: $KEY"
 
         if [ "$FORCE_REBUILD" = "true" ]; then
@@ -170,6 +172,43 @@ jobs:
           echo "need_build=true" >> "$GITHUB_OUTPUT"
         fi
 
+    - name: 恢复工具链缓存
+      id: restore
+      # ⚠ 必须在「编译工具链」之前。
+      #   原来这个步骤排在第 10 位（build 之后），等于编译时工作区里根本没有缓存，
+      #   每次都从零编 tools + toolchain（46 分钟），restore 只起到「给 save 垫底」的作用。
+      #
+      #   无条件恢复：命中就省时间；没命中 restore 也只是 no-op
+      #   （fail-on-cache-miss 默认 false）。
+      uses: actions/cache/restore@main
+      with:
+        # 与 openwrt-builder.yml 的 restore 逐项一致，否则固件构建永远命不中
+        path: |
+          /workdir/openwrt/staging_dir/host
+          /workdir/openwrt/staging_dir/toolchain-*
+          /workdir/openwrt/build_dir/toolchain-*
+          /workdir/openwrt/build_dir/host
+        key: toolchain-v2-${{ steps.tc.outputs.fingerprint }}
+        # v1 缓存（只有 staging_dir）兜底：这样第一次建 v2 时
+        # 只需补编 tools，不用从零编 46 分钟
+        restore-keys: |
+          toolchain-${{ steps.tc.outputs.fingerprint }}
+
+    - name: 修正缓存时间戳
+      # 源码刚 clone（mtime=现在），缓存里的戳记是几天前 → make 会判定全部要重编。
+      # 两批 touch：普通文件先，戳记后（保证戳记永远比源码新）。
+      if: steps.restore.outputs.cache-matched-key != ''
+      run: |
+        cd /workdir/openwrt
+        DIRS="staging_dir/host build_dir/host"
+        for d in staging_dir/toolchain-* build_dir/toolchain-*; do [ -d "$d" ] && DIRS="$DIRS $d"; done
+        find $DIRS -type f ! -path '*/stamp/*' ! -name '.built*' ! -name '.configured*' \
+          ! -name '.prepared*' ! -name '.installed*' -exec touch -h {} + 2>/dev/null || true
+        find $DIRS \( -path '*/stamp/*' -o -name '.built*' -o -name '.configured*' \
+             -o -name '.prepared*' -o -name '.installed*' \) -exec touch -h {} + 2>/dev/null || true
+        echo "tools 戳记: $(ls staging_dir/host/stamp/.tools_compile_* 2>/dev/null | wc -l) 个"
+        echo "工具链完成戳: $(ls staging_dir/toolchain-*/stamp/.gcc_final_installed 2>/dev/null | wc -l) 个"
+
     - name: 编译工具链
       id: build
       if: steps.check.outputs.need_build == 'true'
@@ -190,24 +229,7 @@ jobs:
           exit 1
         fi
         echo "✅ 完成戳: $STAMP"
-        ls -d staging_dir/toolchain-* build_dir/toolchain-* 2>/dev/null || true
-
-    - name: 恢复工具链缓存
-      id: restore
-      # 两条路径都要恢复：
-      #   1) force_rebuild=true → 跳过「检查是否已有缓存」，但缓存其实存在，
-      #      必须先 restore 才能让 make 看到 stamp、从而走增量编译；
-      #   2) 检查命中（need_build=false）→ 这次就是来补存/校验的。
-      # 不 restore 直接 save 会在 key 已存在时抛
-      #   「Unable to reserve cache with key ..., another job may be creating this cache」
-      if: env.FORCE_REBUILD == 'true' || steps.check.outputs.need_build == 'false'
-      uses: actions/cache/restore@main
-      with:
-        path: |
-          /workdir/openwrt/staging_dir/host
-          /workdir/openwrt/staging_dir/toolchain-*
-          /workdir/openwrt/build_dir/toolchain-*
-        key: toolchain-${{ steps.tc.outputs.fingerprint }}
+        ls -d staging_dir/toolchain-* build_dir/toolchain-* build_dir/host 2>/dev/null || true
 
     - name: 保存工具链缓存
       id: save
@@ -222,12 +244,16 @@ jobs:
         && (steps.build.outcome == 'success' || steps.restore.outputs.cache-hit == 'true')
       uses: actions/cache/save@main
       with:
-        # 三块缺一不可：stamp 在 toolchain-* 里，tools 的 stamp 在 host 里
+        # 四块缺一不可：
+        #   stamp 在 toolchain-*/ 和 host/stamp/ 里；
+        #   而没有 build_dir/host 的话，固件构建会重编全部 tools（19.9 min），
+        #   进而刷新 tools stamp、把工具链也拖着重编（26.2 min）。
         path: |
           /workdir/openwrt/staging_dir/host
           /workdir/openwrt/staging_dir/toolchain-*
           /workdir/openwrt/build_dir/toolchain-*
-        key: toolchain-${{ steps.tc.outputs.fingerprint }}
+          /workdir/openwrt/build_dir/host
+        key: toolchain-v2-${{ steps.tc.outputs.fingerprint }}
 
     - name: 结果汇总
       if: always()

@@ -343,6 +343,54 @@ jobs:
         fi
 
     # =========================================================
+    # 关键包校验
+    #
+    # `make defconfig` 对「依赖不满足」和「符号不存在」都是**静默剔除**：
+    # 不报错、不告警，只是把 =y 抹掉，编完才发现固件里少个菜单。
+    # 这是唯一能提前发现的地方。
+    #
+    # 改插件时**必须同步改这里**：
+    #   - 列表里只写本次真正启用的包。没装的留在列表里，这一步必然 exit 1。
+    #   - 下面「必须不存在」的列表用来防撞车。
+    # =========================================================
+    - name: 校验关键包
+      run: |
+        cd openwrt
+        MISS=""
+        for p in \
+          luci-app-homeproxy \
+          luci-app-tailscale \
+          sing-box \
+          curl \
+          libcurl \
+          kmod-tun \
+          ca-bundle
+        do
+          grep -q "^CONFIG_PACKAGE_${p}=y" .config || MISS="$MISS $p"
+        done
+
+        # 必须**不**启用：这两个都会安装 /etc/init.d/tailscale + /etc/config/tailscale，
+        # 与 whzhni1/luci-app-tailscale 抢同一批文件（构建期后者静默覆盖前者，
+        # 运行期行为不可预期）。详见 diy-part1.sh 里的说明。
+        BAD=""
+        for p in tailscale luci-app-tailscale-community; do
+          if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+            echo "::error::${p} 不应启用：会与 luci-app-tailscale 抢 /etc/init.d/tailscale 和 /etc/config/tailscale"
+            BAD="$BAD $p"
+          fi
+        done
+
+        if [ -n "$MISS" ]; then
+          echo "::error::defconfig 之后这些包没有生效（多半是依赖不满足或源码没拉到）:$MISS"
+          echo "::error::检查 diy-part1.sh 的 clone 段与对应开关是否打开"
+          exit 1
+        fi
+        if [ -n "$BAD" ]; then
+          exit 1
+        fi
+        echo "✅ 关键包校验通过：homeproxy + tailscale(whzhni1) + curl/libcurl + kmod-tun"
+
+    # =========================================================
     # 工具链缓存
     #
     # OpenWrt 的工具链只取决于「GCC 版本 + libc + binutils + toolchain/ 目录内容」，
@@ -373,36 +421,130 @@ jobs:
       if: env.REUSE_TOOLCHAIN == 'true'
       uses: actions/cache/restore@main
       with:
-        # 三块一起存，stamp 才能跟着回来
+        # 四块一起存：
+        #   staging_dir/host      ← tools 装出来的宿主工具（ccache/gcc 包装等）
+        #   staging_dir/toolchain-* ← 交叉工具链产物 + stamp
+        #   build_dir/toolchain-*  ← 工具链编译目录（含 .built 戳记）
+        #   build_dir/host         ← tools 编译目录（含 .built 戳记）★ v2 新增
+        #
+        # 为什么必须带 build_dir/host：tools 的「已编译」判定只看
+        # build_dir/host/<pkg>/.built。只恢复 staging_dir/host 而没有戳记，
+        # make 会把 30 多个 tools 全部重编（实测 19.9 分钟），
+        # 编完刷新 staging_dir/host/stamp/.tools_compile_* →
+        # 而 toolchain/compile 依赖 $(tools/stamp-compile) → 工具链被判为要重编
+        # （实测又 26.2 分钟）。也就是说少了 build_dir/host，
+        # 「工具链缓存命中」其实是假的，白烧 46 分钟。
         path: |
           /workdir/openwrt/staging_dir/host
           /workdir/openwrt/staging_dir/toolchain-*
           /workdir/openwrt/build_dir/toolchain-*
-        key: toolchain-${{ steps.tc.outputs.fingerprint }}
+          /workdir/openwrt/build_dir/host
+        key: toolchain-v2-${{ steps.tc.outputs.fingerprint }}
+        # v2 还没建起来时，先用 v1 兜底（v1 只有 staging_dir，没有 build_dir/host）。
+        # 这样第一次构建至少不用重编工具链本身，只补一次 tools。
+        restore-keys: |
+          toolchain-${{ steps.tc.outputs.fingerprint }}
+
+    - name: 修正缓存恢复出来的时间戳
+      # 源码是本次刚 clone 的（mtime = 现在），而缓存里的戳记 mtime 是几天前。
+      # make 按「prereq 比 target 新就重编」判断，于是会认为源码更新过 → 全部重编。
+      #
+      # 分两批 touch，顺序很关键：
+      #   第 1 批 普通文件（源码/对象文件）→ T1
+      #   第 2 批 戳记（stamp/、.built、.configured…）→ T2 > T1
+      # 只做一批的话，戳记有可能比同目录的源码更早，make 照样重编。
+      # 用 cache-matched-key 而不是 cache-hit：restore-keys 兜底到 v1 时
+      # cache-hit 是 'false'，但确实恢复了东西，也需要 touch。
+      if: env.REUSE_TOOLCHAIN == 'true' && steps.tc_cache.outputs.cache-matched-key != ''
+      run: |
+        cd /workdir/openwrt
+        DIRS="staging_dir/host build_dir/host"
+        for d in staging_dir/toolchain-* build_dir/toolchain-*; do [ -d "$d" ] && DIRS="$DIRS $d"; done
+
+        echo "--- touch 前 ---"
+        ls -ld --time-style=+%F_%T $DIRS 2>/dev/null | head -5
+
+        # 第 1 批：非戳记文件
+        find $DIRS -type f \
+          ! -path '*/stamp/*' ! -name '.built*' ! -name '.configured*' \
+          ! -name '.prepared*' ! -name '.installed*' \
+          -exec touch -h {} + 2>/dev/null || true
+
+        # 第 2 批：戳记（晚于第 1 批）
+        find $DIRS \( -path '*/stamp/*' -o -name '.built*' -o -name '.configured*' \
+             -o -name '.prepared*' -o -name '.installed*' \) \
+          -exec touch -h {} + 2>/dev/null || true
+
+        echo "--- touch 后 ---"
+        ls -ld --time-style=+%F_%T staging_dir/host/stamp/.tools_compile_* 2>/dev/null | head -3 || true
+        echo "✅ tools 戳记: $(ls staging_dir/host/stamp/.tools_compile_* 2>/dev/null | wc -l) 个"
+        echo "✅ host 编译戳记: $(find build_dir/host -name '.built' 2>/dev/null | wc -l) 个"
+        echo "✅ 工具链完成戳: $(ls staging_dir/toolchain-*/stamp/.gcc_final_installed 2>/dev/null | wc -l) 个"
 
     - name: 工具链复用结果
       run: |
-        KEY="toolchain-${{ steps.tc.outputs.fingerprint }}"
+        KEY="toolchain-v2-${{ steps.tc.outputs.fingerprint }}"
+        MATCHED="${{ steps.tc_cache.outputs.cache-matched-key }}"
+        HIT="${{ steps.tc_cache.outputs.cache-hit }}"
+        TOOLS_STAMP=$(ls /workdir/openwrt/staging_dir/host/stamp/.tools_compile_* 2>/dev/null | wc -l)
+
         if [ "$REUSE_TOOLCHAIN" != "true" ]; then
           echo "::notice::已选择「不复用工具链」，本次将从头编译工具链（会慢 20~40 分钟）"
           STATE="不复用（手动关闭）"
-        elif [ "${{ steps.tc_cache.outputs.cache-hit }}" = "true" ]; then
-          echo "::notice::工具链缓存命中，跳过工具链编译"
-          STATE="命中，已跳过工具链编译"
-          ls /workdir/openwrt/staging_dir/toolchain-*/stamp/.gcc_final_installed 2>/dev/null \
-            && echo "✅ 工具链完成戳已恢复" \
-            || echo "::warning::没找到 .gcc_final_installed，工具链可能会重编"
-        else
+        elif [ -z "$MATCHED" ]; then
           echo "::warning::工具链缓存未命中，本次会顺带把工具链一起编了（多花 20~40 分钟）"
           echo "::notice::下次想省这段时间：先去跑 Toolchain Builder，它会单独把 $KEY 编好存起来"
           STATE="未命中，本次随固件一起编译"
+        elif [ "$HIT" = "true" ]; then
+          echo "::notice::工具链缓存精确命中（$KEY），tools 和工具链都跳过"
+          STATE="精确命中，tools + 工具链均跳过"
+        else
+          # restore-keys 兜底到旧版缓存：工具链在，但 tools 的 build_dir 可能缺
+          echo "::notice::工具链缓存前缀命中（$MATCHED），非当前版本"
+          STATE="前缀命中 \`$MATCHED\`"
         fi
+
+        if [ "$TOOLS_STAMP" -gt 0 ]; then
+          echo "✅ tools 完成戳 $TOOLS_STAMP 个 → tools 阶段会被跳过"
+        else
+          echo "::warning::没有 tools 完成戳，本次会重编全部 tools（约 20 分钟）"
+        fi
+        ls /workdir/openwrt/staging_dir/toolchain-*/stamp/.gcc_final_installed 2>/dev/null \
+          && echo "✅ 工具链完成戳已恢复" \
+          || echo "::warning::没找到 .gcc_final_installed，工具链可能会重编"
+
         {
           echo "### 工具链"
           echo ""
           echo "- 指纹：\`${{ steps.tc.outputs.fingerprint }}\`"
           echo "- 状态：$STATE"
+          echo "- tools 完成戳：${TOOLS_STAMP} 个"
         } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: 计算下载缓存 key
+      id: dlkey
+      run: |
+        # 不用 ${{ hashFiles('openwrt/.config') }}：源码在 /workdir，
+        # workspace 里只有一个符号链接，hashFiles 走软链不可靠，可能返回空串
+        # → key 退化成 "dl-"，所有配置共用一个缓存。
+        H=$(md5sum /workdir/openwrt/.config | cut -c1-16)
+        echo "hash=$H" >> "$GITHUB_OUTPUT"
+        echo "下载缓存 key: dl-$H"
+
+    - name: 缓存下载目录
+      uses: actions/cache@v4
+      with:
+        # dl/ 里全是上游的源码 tar 包。命中时省下 make download 的 2~4 分钟
+        # （实测 2.1 / 4.3 分钟），网络差的时候更值。
+        #
+        # key 用 .config 的内容哈希：
+        #   · 包集合由 .config 决定，config 不变就不会缺包 → 命中率高
+        #   · 换插件后 .config 变了 → 自动换 key 重新下载并重建缓存
+        #   · 不会像「每次 run_id」那样把缓存堆爆（10 GB 限额）
+        # 用 actions/cache@v4（单步）而不是 restore/save 分离：
+        # miss 时它自己会在 job 结束时存，hit 时不动，不需要额外步骤。
+        path: /workdir/openwrt/dl
+        key: dl-${{ steps.dlkey.outputs.hash }}
 
     - name: Download package
       id: package
@@ -440,11 +582,13 @@ jobs:
         && steps.tc_cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@main
       with:
+        # 与 restore 的 path / key 必须逐项一致（含 build_dir/host）
         path: |
           /workdir/openwrt/staging_dir/host
           /workdir/openwrt/staging_dir/toolchain-*
           /workdir/openwrt/build_dir/toolchain-*
-        key: toolchain-${{ steps.tc.outputs.fingerprint }}
+          /workdir/openwrt/build_dir/host
+        key: toolchain-v2-${{ steps.tc.outputs.fingerprint }}
 
     - name: Check space usage
       if: (!cancelled())

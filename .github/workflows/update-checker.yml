@@ -53,7 +53,8 @@ jobs:
 
     - name: Compare Commit Hash
       id: cacheHash
-      uses: actions/cache@v4
+      # v5 = Node 24 运行时。v4 是 Node 20，已被 GitHub 弃用并强制降级执行 + 告警。
+      uses: actions/cache@v5
       with:
         path: .commitHash
         key: commitHash_${{ steps.getHash.outputs.commitHash }}

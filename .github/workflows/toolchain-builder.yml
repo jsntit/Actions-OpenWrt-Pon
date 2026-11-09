@@ -192,9 +192,34 @@ jobs:
         echo "✅ 完成戳: $STAMP"
         ls -d staging_dir/toolchain-* build_dir/toolchain-* 2>/dev/null || true
 
+    - name: 恢复工具链缓存
+      id: restore
+      # 两条路径都要恢复：
+      #   1) force_rebuild=true → 跳过「检查是否已有缓存」，但缓存其实存在，
+      #      必须先 restore 才能让 make 看到 stamp、从而走增量编译；
+      #   2) 检查命中（need_build=false）→ 这次就是来补存/校验的。
+      # 不 restore 直接 save 会在 key 已存在时抛
+      #   「Unable to reserve cache with key ..., another job may be creating this cache」
+      if: env.FORCE_REBUILD == 'true' || steps.check.outputs.need_build == 'false'
+      uses: actions/cache/restore@main
+      with:
+        path: |
+          /workdir/openwrt/staging_dir/host
+          /workdir/openwrt/staging_dir/toolchain-*
+          /workdir/openwrt/build_dir/toolchain-*
+        key: toolchain-${{ steps.tc.outputs.fingerprint }}
+
     - name: 保存工具链缓存
-      # 只有「真的编译并成功」才存：跳过时 outcome=skipped，失败时 outcome=failure
-      if: steps.build.outcome == 'success'
+      id: save
+      # ⚠ 不能写成 `steps.build.outcome == 'success'`：
+      #   「检查是否已有缓存」判定命中时 steps.build 是 skipped，条件恒为 false，
+      #   于是这个 workflow 就变成「查完说有缓存、然后什么都不做」——
+      #   而那个缓存是固件构建顺手存的（它只存 staging_dir，没有 build_dir）。
+      #   这里要的是「本次结束时工作区里确实有完整工具链」就存。
+      if: >-
+        success()
+        && steps.build.outcome != 'failure'
+        && (steps.build.outcome == 'success' || steps.restore.outputs.cache-hit == 'true')
       uses: actions/cache/save@main
       with:
         # 三块缺一不可：stamp 在 toolchain-* 里，tools 的 stamp 在 host 里
@@ -219,6 +244,14 @@ jobs:
             echo "| 编译耗时 | ${{ steps.build.outputs.elapsed }} 秒 |"
           else
             echo "| 是否重新编译 | 否（缓存已存在） |"
+          fi
+          # 缓存到底存下了没有 —— 之前这里静默跳过，看板上一片绿但什么都没存
+          if [ "${{ steps.save.outcome }}" = "success" ]; then
+            echo "| 缓存 | 本次已写入 \`${{ steps.tc.outputs.fingerprint }}\` |"
+          elif [ "${{ steps.save.outcome }}" = "skipped" ]; then
+            echo "| 缓存 | ⚠ 被跳过（见 build 步骤结果） |"
+          else
+            echo "| 缓存 | ❌ 保存失败：${{ steps.save.outcome }} |"
           fi
           echo ""
           echo "> 固件构建（PonWrt Builder）会在 \`reuse_toolchain=true\` 时自动命中这个缓存。"

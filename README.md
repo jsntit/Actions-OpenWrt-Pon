@@ -99,14 +99,47 @@ soc 与 profile 必须配套，填错会在「环境自检」这一步直接报�
 
 ### 加插件
 
-`diy-part1.sh` 里的开关只管「源码有没有拉到 `package/custom`」，
-还要在对应的 `configs/*.config` 里把包改成 `=y` 才会编进去。两处必须一起改：
+先分清两种情况，**大多数插件属于第一种**：
+
+**A. feeds 里自带的包 → 只改 `configs/*.config`**
+
+ponwrt 的 feeds 已经有 `immortalwrt/luci`（所有 `luci-app-*`）和 `immortalwrt/packages`
+（各种后端）。这类包只需要在 config 里把 `is not set` 改成 `=y`。
+
+```bash
+sed -i 's|^# CONFIG_PACKAGE_luci-app-xxx is not set|CONFIG_PACKAGE_luci-app-xxx=y|' configs/*.config
+```
+
+⚠ 顺手把依赖包也确认一遍。`luci-app-xxx` 的 `LUCI_DEPENDS` 里列的每个包都必须是 `=y`，
+否则 `defconfig` 会**静默剔除**整个包（不报错，固件里就是没这个菜单）。
+
+**B. feeds 里没有的包 → 还要在 `diy-part1.sh` 里 clone 源码**
+
+`diy-part1.sh` 里的开关只管「源码有没有拉到 `package/custom`」。两处必须一起改：
 
 - 只开开关不改 config → 白拉
 - 只改 config 不开开关 → `defconfig` 把那个 `=y` **静默剔除**，不报错
 
-当前默认开启的只有 `luci-app-airoha-npu`（Airoha SoC 状态页）。
-homeproxy / passwall2 / openclash / mosdns / lucky 的开关都在文件里，默认 `false`。
+### 当前内置的插件
+
+三个常用插件已默认开启（两个 SoC 配置都改了）：
+
+| 插件 | 作用 | 依赖（已确认 `=y`） | 来源 |
+|---|---|---|---|
+| `luci-app-frpc` | frp 内网穿透客户端 | `frpc` | luci feeds + packages 的 `net/frp` |
+| `luci-app-zerotier` | ZeroTier 虚拟局域网 | `zerotier` | luci feeds + packages 的 `net/zerotier` |
+| `luci-app-homeproxy` | sing-box 代理面板 | `sing-box`、`firewall4`、`kmod-nft-tproxy`、`ucode-mod-digest` | 全部在现有 feeds / 主仓库 |
+
+**这三个都不需要 `diy-part1.sh` 去 clone 任何源码** —— 它们的包和依赖全都在 ponwrt
+现有的 feeds 里。`frpc` 由 `immortalwrt/packages` 的 `net/frp` 包提供（同一个 Makefile
+同时产出 `frpc` 和 `frps`）；`ucode-mod-digest` 由主仓库 `package/utils/ucode` 提供。
+
+另外 `luci-app-airoha-npu`（Airoha SoC 状态页）不在 feeds 里，靠 `diy-part1.sh` 单独 clone。
+passwall2 / openclash / mosdns / lucky 的开关都在文件里，默认 `false`。
+
+> 加 homeproxy 会让编译多 15~25 分钟（sing-box 是 Go 写的，首次要拉 Go 工具链），
+> 固件大约 +30MB。如果只想要内网穿透 + 组网，把 `luci-app-homeproxy` 和 `sing-box`
+> 两行改回 `is not set` 即可。
 
 ## 工具链复用（省 20~40 分钟）
 

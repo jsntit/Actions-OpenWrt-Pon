@@ -31,3 +31,18 @@ coreutils-timeout
 # 真出现了说明 diy-part1.sh 的开关或 config 被误改。
 !tailscale
 !luci-app-tailscale-community
+
+# ---------------------------------------------------------------
+# 光口(PON) + 2.5G 电口：这些是 DEVICE_PACKAGES 里的设备驱动，
+# 必须内置成 =y。写成 =m 时 workflow 会把 PER_DEVICE_ROOTFS 置 n，
+# include/image.mk 就不会把它们并进 rootfs —— defconfig 不报错，
+# 固件里却没有驱动（表现：PON 状态页报「状态响应格式错误」、2.5G 口不通）。
+# 注：an7581 专属的 kmod-airoha-paged-bosa / kmod-phy-maxlinear /
+#     kmod-phy-realtek / rtl826x-firmware 不能写进本清单，an7583 没有这些符号。
+kmod-airoha-xpon
+kmod-airoha-pon-frontend
+kmod-airoha-en7572
+kmod-phy-airoha-en8811h
+airoha-ponctl
+airoha-pond
+luci-app-pon

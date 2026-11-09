@@ -16,7 +16,7 @@
 ## 快速开始
 
 > **先选分支**：`main` 是干净基线（不带额外插件）；日常编固件请切到对应分支 ——
-> `for-zhangbin`（frpc + zerotier + homeproxy）或 `for-maym`（homeproxy + tailscale）。
+> `for-zhangbin`（frpc + zerotier + homeproxy + 集客 AC）或 `for-maym`（homeproxy + tailscale）。
 > 详见下方「[分支与各分支的插件](#分支与各分支的插件)」。
 >
 > ⚠ 两个插件分支上跑 Toolchain Builder 编出的工具链缓存**只有该分支能用**。
@@ -135,7 +135,7 @@ sed -i 's|^# CONFIG_PACKAGE_luci-app-xxx is not set|CONFIG_PACKAGE_luci-app-xxx=
 | 分支 | 插件组合 | 说明 |
 |---|---|---|
 | `main` | 无（只有 `luci-app-airoha-npu`） | 基线 / 干净版 |
-| `for-zhangbin` | `luci-app-frpc` + `luci-app-zerotier` + `luci-app-homeproxy` | 内网穿透 + 组网 + 代理 |
+| `for-zhangbin` | `luci-app-frpc` + `luci-app-zerotier` + `luci-app-homeproxy` + `luci-app-gecoosac` | 内网穿透 + 组网 + 代理 + 集客 AC |
 | `for-maym` | `luci-app-homeproxy` + `luci-app-tailscale-community` | 代理 + Tailscale 组网 |
 
 各插件的依赖与来源（`configs/an7581.config`、`configs/an7583.config`、`.config` 三份同步改）：
@@ -146,15 +146,40 @@ sed -i 's|^# CONFIG_PACKAGE_luci-app-xxx is not set|CONFIG_PACKAGE_luci-app-xxx=
 | `luci-app-zerotier` | `luci-app-zerotier` | `zerotier` | luci feeds；`zerotier` 来自 packages 的 `net/zerotier` |
 | `luci-app-homeproxy` | `luci-app-homeproxy` | `sing-box`、`firewall4`、`kmod-nft-tproxy`、`ucode-mod-digest` | luci feeds；`sing-box` 来自 packages 的 `net/sing-box`；`ucode-mod-digest` 来自主仓库 `package/utils/ucode` |
 | `luci-app-tailscale-community` | `luci-app-tailscale-community` | `tailscale`、`ip-full` | luci feeds（作者 Tokisaki-Galaxy）；`tailscale` 来自 packages 的 `net/tailscale`，需 `golang/host` |
+| `luci-app-gecoosac` | `luci-app-gecoosac` | `gecoosac`、`openssl-util`、`coreutils-timeout` | **不在 feeds 里**，`diy-part1.sh` 从 `laipeng668/luci-app-gecoosac` clone 两个子目录 |
 
 > ⚠ 包名就叫 **`luci-app-tailscale-community`**，immortalwrt/luci 里没有 `luci-app-tailscale`。
 > config 里必须写全名，写成 `luci-app-tailscale` 会被 `defconfig` 静默剔除。
 
-**这些包全部不需要 `diy-part1.sh` 去 clone 任何源码** —— 包和依赖都在 ponwrt 现有的
-feeds 里（`frpc` 由 `net/frp` 这一个 Makefile 同时产出 `frpc` + `frps`）。
+**除了 gecoosac，其余包都不需要 `diy-part1.sh` 去 clone 任何源码** —— 包和依赖都在 ponwrt
+现有的 feeds 里（`frpc` 由 `net/frp` 这一个 Makefile 同时产出 `frpc` + `frps`）。
 
-`luci-app-airoha-npu`（Airoha SoC 状态页）不在 feeds 里，靠 `diy-part1.sh` 单独 clone。
+`luci-app-airoha-npu`（Airoha SoC 状态页）和 `gecoosac` 不在 feeds 里，靠 `diy-part1.sh` 单独 clone。
 passwall2 / openclash / mosdns / lucky 的开关都在文件里，默认 `false`。
+
+### gecoosac（集客 AC 控制器）
+
+源：<https://github.com/laipeng668/luci-app-gecoosac>（JS 增强版，AGPL-3.0）。
+**这是个 monorepo，必须整仓 clone 后拷两个子目录进去**，少一个就编不出来：
+
+| 子目录 | 是什么 | 要点 |
+|---|---|---|
+| `gecoosac/` | 守护进程 | **不编源码**，直接下载 release 里的预编译二进制（按 `ARCH_PACKAGES` 选架构） |
+| `luci-app-gecoosac/` | LuCI 界面 | `LUCI_DEPENDS: +gecoosac +gecoosac-files +gecoosac-common`，后两个是 `gecoosac` 的 `PROVIDES` |
+
+固件里额外打开的依赖：`openssl-util`（AC 的 HTTPS 管理页要用）、`coreutils-timeout`（init 脚本用了 `timeout`）。
+
+**架构匹配**：an7581 / an7583 都是 `aarch64` + `ARCH_PACKAGES=aarch64_cortex-a53`，
+`gecoosac/Makefile` 里 `aarch64%` 分支命中 `ac_linux_arm64`，约 16 MB。
+换到 mips 系机型会走 `ac_linux_mips*`，也在 release 里，覆盖是全的。
+
+> ⚠ `luci-app-gecoosac/Makefile` 里写的是**绝对路径** `include $(TOPDIR)/feeds/luci/luci.mk`。
+> 它被放在 `package/custom/luci-app-gecoosac/`，如果顺手改成 `../../luci.mk`，会解析到
+> `package/luci.mk`（不存在）直接报错。feeds 里的包能用 `../../luci.mk` 是因为它们在
+> `feeds/luci/applications/` 下。**别动这一行。**
+
+> 需要设备侧配好集客 AP 才用得上；只当普通路由器用可以先关掉
+> （`luci-app-gecoosac` 和 `gecoosac` 两行改回 `is not set`，`diy-part1.sh` 里 `ADD_GECOOSAC=false`）。
 
 > 耗时代价：homeproxy 多 15~25 分钟（sing-box 是 Go），tailscale 也多 10~20 分钟
 > （tailscaled 同样是 Go，首次要编 `golang/host`）。两者合计固件大约 +50MB。

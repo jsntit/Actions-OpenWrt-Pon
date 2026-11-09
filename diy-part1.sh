@@ -49,12 +49,14 @@ clone() {  # clone <url> <dir> [branch]
 #   defconfig 把那个 =y 静默剔除（不报错，固件里就是没这个菜单）。
 # ---------------------------------------------------------
 ADD_AIROHA_NPU=true    # luci-app-airoha-npu：Airoha SoC 状态页（NPU/CPU/Frame Engine/PPE）
+ADD_GECOOSAC=true      # gecoosac + luci-app-gecoosac：集客 AC 控制器（JS 增强版）
 
 # 本分支（for-zhangbin）在 configs/*.config 里已经开了的包，feeds 里自带，不需要在这里 clone：
 #     luci-app-frpc      ← immortalwrt/luci，本体 frpc 来自 immortalwrt/packages 的 net/frp
 #     luci-app-zerotier  ← immortalwrt/luci，本体 zerotier 来自 immortalwrt/packages 的 net/zerotier
 #     luci-app-homeproxy ← immortalwrt/luci，依赖 sing-box / firewall4 / kmod-nft-tproxy /
 #                          ucode-mod-digest，全部在现有 feeds 或主仓库里
+#   gecoosac 不在 feeds 里，必须靠下面的 ADD_GECOOSAC 开关 clone（见本文件末尾）。
 #   保留下面几个变量只是为了「万一要换源」时有地方改，默认 false。
 ADD_HOMEProxy=false    # 换成自己的 homeproxy 源时才置 true（默认用 feeds 里的）
 ADD_PASSWALL2=false    # luci-app-passwall2（UI + openwrt-passwall-packages 后端）
@@ -165,11 +167,66 @@ if [ "$ADD_LUCKY" = "true" ]; then
 fi
 
 # ---------------------------------------------------------
+# gecoosac（集客 AC 控制器，laipeng668 的 JS 增强版）
+#
+# 仓库是 monorepo，两个包必须**同时**放进去，缺一个就编不出来：
+#   gecoosac/            → 守护进程。不编源码，直接下载 release 里的
+#                          预编译二进制（ac_linux_arm64 等），按
+#                          $(ARCH_PACKAGES) 选架构。an7581/an7583 都是
+#                          aarch64_cortex-a53 → ac_linux_arm64（≈16MB）
+#                          DEPENDS: @(aarch64||arm||...) +openssl-util +coreutils-timeout
+#   luci-app-gecoosac/   → LuCI 界面，LUCI_DEPENDS 里带 +gecoosac
+#                          +gecoosac-files +gecoosac-common
+#                          （后两个是 gecoosac 的 PROVIDES，由它一起提供）
+#
+# ⚠ luci-app-gecoosac/Makefile 用的是绝对路径：
+#       include $(TOPDIR)/feeds/luci/luci.mk
+#   这一句**必须原样保留，不要改成 ../../luci.mk**。
+#   本仓库把它放在 package/custom/luci-app-gecoosac/，往上两级是
+#   package/luci.mk —— 那里根本不存在 luci.mk，改成相对路径会直接报
+#   "package/luci.mk: No such file or directory"。
+#   feeds 里的 luci-app-xxx 之所以能用 ../../luci.mk，是因为它们位于
+#   feeds/luci/applications/ 下，往上两级正好是 feeds/luci/。
+#
+#   绝对路径成立的前提：LuCI 的 luci.mk 存在于 feeds/luci。
+#   luci feed 是 ponwrt 的必备 feed，`feeds update` 之后一定会有；
+#   本脚本虽在 feeds update 之前执行，但 Makefile 是到 package 扫描 /
+#   编译阶段才被 include，那时 feeds 已经就绪，所以没问题。
+# ---------------------------------------------------------
+if [ "$ADD_GECOOSAC" = "true" ]; then
+  GECO_TMP="$(mktemp -d)/gecoosac"
+  if clone https://github.com/laipeng668/luci-app-gecoosac "$GECO_TMP" main \
+     && [ -f "$GECO_TMP/gecoosac/Makefile" ] \
+     && [ -f "$GECO_TMP/luci-app-gecoosac/Makefile" ]; then
+    rm -rf "$PKG_DIR/gecoosac" "$PKG_DIR/luci-app-gecoosac"
+    cp -r "$GECO_TMP/gecoosac" "$PKG_DIR/"
+    cp -r "$GECO_TMP/luci-app-gecoosac" "$PKG_DIR/"
+
+    echo "   gecoosac 版本: $(grep -m1 '^PKG_VERSION' "$PKG_DIR/gecoosac/Makefile" 2>/dev/null)"
+    echo "   预编译二进制按 TARGET_ARCH_PACKAGES 选："
+    echo "     aarch64_* → ac_linux_arm64   （an7581 / an7583 都是这条）"
+  else
+    echo "::error::gecoosac 拉取失败或仓库结构变化（需要 gecoosac/ 与 luci-app-gecoosac/ 两个子目录）"
+    exit 1
+  fi
+  rm -rf "$GECO_TMP"
+fi
+
+# ---------------------------------------------------------
 # 校验：默认开启的插件必须拉到，否则 defconfig 会静默剔除
 # ---------------------------------------------------------
 if [ "$ADD_AIROHA_NPU" = "true" ] && [ ! -d "$PKG_DIR/luci-app-airoha-npu" ]; then
   echo "::error::luci-app-airoha-npu 未拉到，config 里的 =y 会被 defconfig 剔除"
   exit 1
+fi
+
+if [ "$ADD_GECOOSAC" = "true" ]; then
+  for d in gecoosac luci-app-gecoosac; do
+    if [ ! -f "$PKG_DIR/$d/Makefile" ]; then
+      echo "::error::$d 未拉到，config 里的 =y 会被 defconfig 剔除"
+      exit 1
+    fi
+  done
 fi
 
 echo "=========================================="

@@ -252,11 +252,22 @@ jobs:
         # ⚠ 只动 DEVICE 相关的三组符号，别用 /^CONFIG_TARGET_/ 一刀切：
         #   那样会连 CONFIG_TARGET_DEVICE_PACKAGES_* 和 TARGET_OPTIMIZATION
         #   之类一起删掉，defconfig 重算后可能丢配置。
-        sed -i "/^CONFIG_TARGET_airoha_\|^# CONFIG_TARGET_airoha_/d" .config
-        sed -i "/^CONFIG_TARGET_DEVICE_\|^# CONFIG_TARGET_DEVICE_/d" .config
-        sed -i "/^CONFIG_TARGET_ALL_PROFILES\|^# CONFIG_TARGET_ALL_PROFILES/d" .config
-        sed -i "/^CONFIG_TARGET_MULTI_PROFILE\|^# CONFIG_TARGET_MULTI_PROFILE/d" .config
-        sed -i "/^CONFIG_TARGET_PER_DEVICE_ROOTFS\|^# CONFIG_TARGET_PER_DEVICE_ROOTFS/d" .config
+        #
+        # ⚠ 第一条 sed 的正则末尾是 [=_] 字符类，不是下划线。
+        #   原来写的 `^CONFIG_TARGET_airoha_` 只能命中带下划线的
+        #   CONFIG_TARGET_airoha_an7581 / _en7523，**漏掉不带下划线的
+        #   `CONFIG_TARGET_airoha=y`**。而下面又无条件追加一次
+        #   CONFIG_TARGET_airoha=y，于是同一个 choice 符号在 .config 里
+        #   出现两次（第 10 行 + 文件末尾）。
+        #   kconfig 解析时会 `warning: override: TARGET_airoha changes choice state`，
+        #   choice 状态被搅乱 → 依赖它的 TARGET_DEVICE_* 全部失效，
+        #   defconfig 后回落到该 SoC 的默认机型 airoha_an7581-evb-multievb，
+        #   报「机型 xxx 没有生效」。
+        sed -i -E "/^CONFIG_TARGET_airoha[=_]|^# CONFIG_TARGET_airoha[ =]/d" .config
+        sed -i -E "/^CONFIG_TARGET_DEVICE_|^# CONFIG_TARGET_DEVICE_/d" .config
+        sed -i -E "/^CONFIG_TARGET_ALL_PROFILES|^# CONFIG_TARGET_ALL_PROFILES/d" .config
+        sed -i -E "/^CONFIG_TARGET_MULTI_PROFILE|^# CONFIG_TARGET_MULTI_PROFILE/d" .config
+        sed -i -E "/^CONFIG_TARGET_PER_DEVICE_ROOTFS|^# CONFIG_TARGET_PER_DEVICE_ROOTFS/d" .config
         {
           echo "CONFIG_TARGET_airoha=y"
           echo "CONFIG_TARGET_airoha_${SOC}=y"
@@ -273,12 +284,29 @@ jobs:
             echo "CONFIG_TARGET_DEVICE_PACKAGES_airoha_${SOC}_DEVICE_${PROFILE}=\"\""
           fi
         } >> .config
+
+        # 写前自检：这些符号在 .config 里必须各有且只有 1 处。
+        # 重复会让 kconfig 按「最后一个生效」，含义完全不可控。
+        echo "--- 追加后符号唯一性检查 ---"
+        for sym in CONFIG_TARGET_airoha CONFIG_TARGET_airoha_${SOC}; do
+          n=$(grep -cE "^${sym}=" .config || true)
+          echo "  ${sym} = ${n} 处"
+          if [ "${n}" -ne 1 ]; then
+            echo "::error::${sym} 在 .config 里出现 ${n} 次（应为 1 次）—— sed 清理没删干净"
+            grep -nE "^${sym}=" .config
+            exit 1
+          fi
+        done
+
         echo "✅ 已锁定 target: airoha/${SOC}  device: ${PROFILE}"
         make defconfig
         echo "--- defconfig 之后的实际选择 ---"
         grep -E "^CONFIG_TARGET_(airoha|DEVICE|ALL_PROFILES|MULTI_PROFILE)" .config || true
         if [ "${PROFILE}" != "all" ] && ! grep -q "^CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y" .config; then
-          echo "::error::defconfig 之后机型 ${PROFILE} 没有生效 —— 检查 profile 名是否拼写正确"
+          echo "::error::defconfig 之后机型 ${PROFILE} 没有生效"
+          echo "::error::实际选中: $(grep -oE '^CONFIG_TARGET_DEVICE_airoha_[A-Za-z0-9_-]+_DEVICE_[A-Za-z0-9_.-]+=y' .config || echo '(无)')"
+          echo "::error::若实际选中是 airoha_an7581-evb-multievb，说明 TARGET_airoha 这个 choice 的"
+          echo "::error::状态被重复赋值搅乱，检查 config 里 CONFIG_TARGET_airoha[=_] 是否只应出现一次"
           exit 1
         fi
 

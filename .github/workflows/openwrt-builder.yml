@@ -281,6 +281,27 @@ jobs:
         # 只动这几组符号，别用 /^CONFIG_TARGET_/ 一刀切：
         # 那会连 TARGET_DEVICE_PACKAGES_* / TARGET_OPTIMIZATION / TARGET_PREINIT_*
         # 之类一起删掉，defconfig 重算后可能丢配置。
+        #
+        # ============================================================
+        # ★ 单机型也必须走 (B) + PER_DEVICE_ROOTFS=y（对齐 Actions-OpenWrt-AN758X）
+        #
+        #   原来单机型把这三个都设成 n，后果是 include/image.mk 里这段整段不生效：
+        #
+        #     ifdef TARGET_PER_DEVICE_ROOTFS
+        #       $(eval $(call merge_packages,_PACKAGES,$$(DEVICE_PACKAGES) \
+        #              $$(call DEVICE_EXTRA_PACKAGES,$(1))))
+        #     endif
+        #
+        #   → image/an7581.mk、an7583.mk 里每台设备的 DEVICE_PACKAGES（光口 BOSA、
+        #     2.5G PHY、WiFi、USB、SFP、风扇、10G PHY 固件…）一个都不进固件，
+        #     而且 defconfig **不报错、不告警**。表现就是「config 里看着都开了，
+        #     刷进去却没有驱动」，只能靠手工把它们逐个改写成 =y 硬补。
+        #
+        #   现在：MULTI_PROFILE=y + PER_DEVICE_ROOTFS=y，只用
+        #   CONFIG_TARGET_DEVICE_<conf>_DEVICE_<profile>=y 勾中这一台，
+        #   并把 TARGET_DEVICE_PACKAGES_<conf>_DEVICE_<profile> 清空，
+        #   让 image/*.mk 的清单原样生效。20 台设备各自拿自己的包，不再互相牵扯。
+        # ============================================================
         sed -i -E "/^CONFIG_TARGET_airoha[=_]|^# CONFIG_TARGET_airoha[ =_]/d" .config
         sed -i -E "/^CONFIG_TARGET_DEVICE_|^# CONFIG_TARGET_DEVICE_/d" .config
         sed -i -E "/^CONFIG_TARGET_ALL_PROFILES|^# CONFIG_TARGET_ALL_PROFILES/d" .config
@@ -297,12 +318,17 @@ jobs:
             echo "CONFIG_TARGET_MULTI_PROFILE=y"
             echo "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"
           else
-            # 单机型：写 choice (A) 的成员，这才是「选中这个 profile」。
+            # 单机型：choice (A) 照旧写目标机型，保证 kconfig 的选择状态合法；
+            # 但 (B) 的机制**必须保留** —— 见上面 ★：(B) 才是「编哪台设备」的开关，
+            # 也是 DEVICE_PACKAGES 合进 rootfs 的前提。
             echo "CONFIG_TARGET_airoha_${SOC}_DEVICE_${PROFILE}=y"
-            # (B) 的多机型菜单整体关掉，避免它把别的机型的包也带进来。
             echo "CONFIG_TARGET_ALL_PROFILES=n"
-            echo "CONFIG_TARGET_MULTI_PROFILE=n"
-            echo "CONFIG_TARGET_PER_DEVICE_ROOTFS=n"
+            echo "CONFIG_TARGET_MULTI_PROFILE=y"
+            echo "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"
+            # (B) 里只勾这一台，其余机型天然不编（_PROFILE_SET 为空 → install-disabled）
+            echo "CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y"
+            # 清空 per-device 的包覆盖，让 image/*.mk 的 DEVICE_PACKAGES 生效
+            echo "CONFIG_TARGET_DEVICE_PACKAGES_airoha_${SOC}_DEVICE_${PROFILE}=\"\""
           fi
         } >> .config
 
@@ -338,6 +364,25 @@ jobs:
             exit 1
           fi
           echo "✅ choice (A) 命中: CONFIG_TARGET_airoha_${SOC}_DEVICE_${PROFILE}=y"
+
+          # 设备包能否合并进 rootfs，取决于下面三个符号。
+          # 任何一个被 defconfig 重置，固件就会悄悄少驱动 —— 必须硬校验。
+          if ! grep -q "^CONFIG_TARGET_MULTI_PROFILE=y" .config; then
+            echo "::error::MULTI_PROFILE 没生效，设备选择与设备包合并都会失效"
+            exit 1
+          fi
+          if ! grep -q "^CONFIG_TARGET_PER_DEVICE_ROOTFS=y" .config; then
+            echo "::error::PER_DEVICE_ROOTFS 没生效，image/*.mk 的 DEVICE_PACKAGES 会被丢弃"
+            exit 1
+          fi
+          if ! grep -q "^CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y" .config; then
+            echo "::error::(B) 设备选择没生效: CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}"
+            echo "::error::实际命中的设备:"
+            grep -oE "^CONFIG_TARGET_DEVICE_airoha_[A-Za-z0-9]+_DEVICE_[A-Za-z0-9_.-]+=y" .config \
+              | sed 's/^/::error::  /' || true
+            exit 1
+          fi
+          echo "✅ MULTI_PROFILE=y / PER_DEVICE_ROOTFS=y / (B) 命中 —— DEVICE_PACKAGES 会合进 rootfs"
         else
           echo "✅ 多机型模式（all）：MULTI_PROFILE=y"
         fi

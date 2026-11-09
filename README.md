@@ -15,6 +15,13 @@
 
 ## 快速开始
 
+> **先选分支**：`main` 是干净基线（不带额外插件）；日常编固件请切到对应分支 ——
+> `for-zhangbin`（frpc + zerotier + homeproxy）或 `for-maym`（homeproxy + tailscale）。
+> 详见下方「[分支与各分支的插件](#分支与各分支的插件)」。
+>
+> ⚠ 两个插件分支上跑 Toolchain Builder 编出的工具链缓存**只有该分支能用**。
+> 想让两个分支共用一份工具链，请先在 `main` 上跑一次。
+
 ### 平时编固件
 
 1. 打开仓库的 **Actions** 页面，左侧选 **PonWrt Builder**
@@ -120,26 +127,38 @@ sed -i 's|^# CONFIG_PACKAGE_luci-app-xxx is not set|CONFIG_PACKAGE_luci-app-xxx=
 - 只开开关不改 config → 白拉
 - 只改 config 不开开关 → `defconfig` 把那个 `=y` **静默剔除**，不报错
 
-### 当前内置的插件
+### 分支与各分支的插件
 
-三个常用插件已默认开启（两个 SoC 配置都改了）：
+`main` 保持**纯净**（紧跟上游与本仓库的工具链/流程改进，不额外加插件）。
+两个使用分支都从 `main` 分出，各自带一套插件：
 
-| 插件 | 作用 | 依赖（已确认 `=y`） | 来源 |
+| 分支 | 插件组合 | 说明 |
+|---|---|---|
+| `main` | 无（只有 `luci-app-airoha-npu`） | 基线 / 干净版 |
+| `for-zhangbin` | `luci-app-frpc` + `luci-app-zerotier` + `luci-app-homeproxy` | 内网穿透 + 组网 + 代理 |
+| `for-maym` | `luci-app-homeproxy` + `luci-app-tailscale-community` | 代理 + Tailscale 组网 |
+
+各插件的依赖与来源（`configs/an7581.config`、`configs/an7583.config`、`.config` 三份同步改）：
+
+| 插件 | config 符号 | 本体依赖 | 来源 |
 |---|---|---|---|
-| `luci-app-frpc` | frp 内网穿透客户端 | `frpc` | luci feeds + packages 的 `net/frp` |
-| `luci-app-zerotier` | ZeroTier 虚拟局域网 | `zerotier` | luci feeds + packages 的 `net/zerotier` |
-| `luci-app-homeproxy` | sing-box 代理面板 | `sing-box`、`firewall4`、`kmod-nft-tproxy`、`ucode-mod-digest` | 全部在现有 feeds / 主仓库 |
+| `luci-app-frpc` | `luci-app-frpc` | `frpc` | luci feeds；`frpc` 来自 packages 的 `net/frp` |
+| `luci-app-zerotier` | `luci-app-zerotier` | `zerotier` | luci feeds；`zerotier` 来自 packages 的 `net/zerotier` |
+| `luci-app-homeproxy` | `luci-app-homeproxy` | `sing-box`、`firewall4`、`kmod-nft-tproxy`、`ucode-mod-digest` | luci feeds；`sing-box` 来自 packages 的 `net/sing-box`；`ucode-mod-digest` 来自主仓库 `package/utils/ucode` |
+| `luci-app-tailscale-community` | `luci-app-tailscale-community` | `tailscale`、`ip-full` | luci feeds（作者 Tokisaki-Galaxy）；`tailscale` 来自 packages 的 `net/tailscale`，需 `golang/host` |
 
-**这三个都不需要 `diy-part1.sh` 去 clone 任何源码** —— 它们的包和依赖全都在 ponwrt
-现有的 feeds 里。`frpc` 由 `immortalwrt/packages` 的 `net/frp` 包提供（同一个 Makefile
-同时产出 `frpc` 和 `frps`）；`ucode-mod-digest` 由主仓库 `package/utils/ucode` 提供。
+> ⚠ 包名就叫 **`luci-app-tailscale-community`**，immortalwrt/luci 里没有 `luci-app-tailscale`。
+> config 里必须写全名，写成 `luci-app-tailscale` 会被 `defconfig` 静默剔除。
 
-另外 `luci-app-airoha-npu`（Airoha SoC 状态页）不在 feeds 里，靠 `diy-part1.sh` 单独 clone。
+**这些包全部不需要 `diy-part1.sh` 去 clone 任何源码** —— 包和依赖都在 ponwrt 现有的
+feeds 里（`frpc` 由 `net/frp` 这一个 Makefile 同时产出 `frpc` + `frps`）。
+
+`luci-app-airoha-npu`（Airoha SoC 状态页）不在 feeds 里，靠 `diy-part1.sh` 单独 clone。
 passwall2 / openclash / mosdns / lucky 的开关都在文件里，默认 `false`。
 
-> 加 homeproxy 会让编译多 15~25 分钟（sing-box 是 Go 写的，首次要拉 Go 工具链），
-> 固件大约 +30MB。如果只想要内网穿透 + 组网，把 `luci-app-homeproxy` 和 `sing-box`
-> 两行改回 `is not set` 即可。
+> 耗时代价：homeproxy 多 15~25 分钟（sing-box 是 Go），tailscale 也多 10~20 分钟
+> （tailscaled 同样是 Go，首次要编 `golang/host`）。两者合计固件大约 +50MB。
+> 只想保留其中一个时，把另一个插件行和它的本体行一起改回 `is not set`。
 
 ## 工具链复用（省 20~40 分钟）
 

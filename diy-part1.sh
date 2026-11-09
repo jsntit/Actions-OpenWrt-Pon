@@ -50,11 +50,12 @@ clone() {  # clone <url> <dir> [branch]
 # ---------------------------------------------------------
 ADD_AIROHA_NPU=true    # luci-app-airoha-npu：Airoha SoC 状态页（NPU/CPU/Frame Engine/PPE）
 
-# ⚠ 以下三个已经内置到 configs/*.config（=y），feeds 里自带，不需要在这里 clone：
-#     luci-app-frpc      ← immortalwrt/luci，本体 frpc 来自 immortalwrt/packages 的 net/frp
-#     luci-app-zerotier  ← immortalwrt/luci，本体 zerotier 来自 immortalwrt/packages 的 net/zerotier
-#     luci-app-homeproxy ← immortalwrt/luci，依赖 sing-box / firewall4 / kmod-nft-tproxy /
-#                          ucode-mod-digest，全部在现有 feeds 或主仓库里
+# 本分支（for-maym）在 configs/*.config 里已经开了的包，feeds 里自带，不需要在这里 clone：
+#     luci-app-homeproxy             ← immortalwrt/luci，依赖 sing-box / firewall4 /
+#                                      kmod-nft-tproxy / ucode-mod-digest，全在现有 feeds 或主仓库
+#     luci-app-tailscale-community   ← immortalwrt/luci，本体 tailscale 来自
+#                                      immortalwrt/packages 的 net/tailscale（Go 编译，需 golang/host）
+#   （luci-app-frpc / luci-app-zerotier 在本分支是关掉的，要开就改 config 里的 =y）
 #   保留下面几个变量只是为了「万一要换源」时有地方改，默认 false。
 ADD_HOMEProxy=false    # 换成自己的 homeproxy 源时才置 true（默认用 feeds 里的）
 ADD_PASSWALL2=false    # luci-app-passwall2（UI + openwrt-passwall-packages 后端）

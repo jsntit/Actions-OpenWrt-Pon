@@ -25,12 +25,31 @@ runs:
         TARGET_TZ: ${{ inputs.tz }}
       run: |
         set -e
-        # 清掉体积大的预装 SDK，腾出磁盘给编译
+        # ⚠ 清洗 sources.list.d 时**必须保住 ubuntu.sources**。
+        #   Ubuntu 24.04 已经把主源从 /etc/apt/sources.list 迁到
+        #   /etc/apt/sources.list.d/ubuntu.sources（deb822 格式）。
+        #   P3TERX 模板里那句 `rm -rf /etc/apt/sources.list.d/*` 是 22.04 时代写的，
+        #   在 24.04 上等于把唯一的源删掉 → `apt-get update` 更新 0 个源、
+        #   静默成功 → 后面 install 每个包都报 `E: Unable to locate package`。
+        sudo cp -a /etc/apt/sources.list.d/ubuntu.sources /tmp/ubuntu.sources.bak
+        # 清掉第三方源，腾出磁盘给编译（dotnet / android / ghc / CodeQL 体积最大）
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet \
           /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo cp -a /tmp/ubuntu.sources.bak /etc/apt/sources.list.d/ubuntu.sources
         sudo docker image prune --all --force || true
 
         sudo -E apt-get -qq update
+
+        # 自检：源没生效就别往下走，否则要等 2 分钟才看到一堆 Unable to locate
+        if ! apt-cache policy build-essential | grep -q 'Candidate: [0-9]'; then
+          echo "::error::apt 源为空（apt-cache policy build-essential 无候选版本）。"
+          echo "--- /etc/apt/sources.list ---";        cat /etc/apt/sources.list 2>/dev/null || echo "(不存在)"
+          echo "--- sources.list.d 内容 ---";          ls -l /etc/apt/sources.list.d/ 2>/dev/null
+          echo "--- ubuntu.sources ---";               cat /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || echo "(不存在)"
+          echo "--- apt-mirrors.txt ---";              cat /etc/apt/apt-mirrors.txt 2>/dev/null || echo "(不存在)"
+          exit 1
+        fi
+
         sudo -E apt-get -qq install -y \
           ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
           bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext \
@@ -41,8 +60,11 @@ runs:
           pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons \
           squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto \
           xxd zlib1g-dev libgnutls28-dev libjson-c-dev libyaml-dev
-        # 注意：模板原版这行里带 python2.7，24.04 已经没有该包，
-        #       留着会让整条 apt install 直接失败，所以不要加回去。
+        # 注意 1：模板原版这行里带 python2.7，24.04 已经没有该包，
+        #         留着会让整条 apt install 直接失败，所以不要加回去。
+        # 注意 2：24.04 用 libncurses5-dev 会通过 transitional package 装到
+        #         libncurses-dev；将来被移除时改成 libncurses-dev 即可。
+        #         上游 config 里 CONFIG_NCURSES 用的是 libncurses-dev 头文件，两者等价。
 
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean

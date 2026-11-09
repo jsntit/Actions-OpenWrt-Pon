@@ -343,6 +343,54 @@ jobs:
         fi
 
     # =========================================================
+    # 关键包校验
+    #
+    # `make defconfig` 对「依赖不满足」和「符号不存在」都是**静默剔除**：
+    # 不报错、不告警，只是把 =y 抹掉，编完才发现固件里少个菜单。
+    # 这是唯一能提前发现的地方。
+    #
+    # 改插件时**必须同步改这里**：
+    #   - 列表里只写本次真正启用的包。没装的留在列表里，这一步必然 exit 1。
+    #   - 下面「必须不存在」的列表用来防撞车。
+    # =========================================================
+    - name: 校验关键包
+      run: |
+        cd openwrt
+        MISS=""
+        for p in \
+          luci-app-homeproxy \
+          luci-app-tailscale \
+          sing-box \
+          curl \
+          libcurl \
+          kmod-tun \
+          ca-bundle
+        do
+          grep -q "^CONFIG_PACKAGE_${p}=y" .config || MISS="$MISS $p"
+        done
+
+        # 必须**不**启用：这两个都会安装 /etc/init.d/tailscale + /etc/config/tailscale，
+        # 与 whzhni1/luci-app-tailscale 抢同一批文件（构建期后者静默覆盖前者，
+        # 运行期行为不可预期）。详见 diy-part1.sh 里的说明。
+        BAD=""
+        for p in tailscale luci-app-tailscale-community; do
+          if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+            echo "::error::${p} 不应启用：会与 luci-app-tailscale 抢 /etc/init.d/tailscale 和 /etc/config/tailscale"
+            BAD="$BAD $p"
+          fi
+        done
+
+        if [ -n "$MISS" ]; then
+          echo "::error::defconfig 之后这些包没有生效（多半是依赖不满足或源码没拉到）:$MISS"
+          echo "::error::检查 diy-part1.sh 的 clone 段与对应开关是否打开"
+          exit 1
+        fi
+        if [ -n "$BAD" ]; then
+          exit 1
+        fi
+        echo "✅ 关键包校验通过：homeproxy + tailscale(whzhni1) + curl/libcurl + kmod-tun"
+
+    # =========================================================
     # 工具链缓存
     #
     # OpenWrt 的工具链只取决于「GCC 版本 + libc + binutils + toolchain/ 目录内容」，

@@ -49,12 +49,24 @@ clone() {  # clone <url> <dir> [branch]
 #   defconfig 把那个 =y 静默剔除（不报错，固件里就是没这个菜单）。
 # ---------------------------------------------------------
 ADD_AIROHA_NPU=true    # luci-app-airoha-npu：Airoha SoC 状态页（NPU/CPU/Frame Engine/PPE）
+ADD_TAILSCALE_WHZHNI=true   # luci-app-tailscale（whzhni1 新版，自包含：自带 init.d/config/内核下载器）
 
 # 本分支（for-maym）在 configs/*.config 里已经开了的包，feeds 里自带，不需要在这里 clone：
 #     luci-app-homeproxy             ← immortalwrt/luci，依赖 sing-box / firewall4 /
 #                                      kmod-nft-tproxy / ucode-mod-digest，全在现有 feeds 或主仓库
-#     luci-app-tailscale-community   ← immortalwrt/luci，本体 tailscale 来自
-#                                      immortalwrt/packages 的 net/tailscale（Go 编译，需 golang/host）
+#   ⚠ tailscale 已从 feeds 版换成 whzhni1/luci-app-tailscale（见 ADD_TAILSCALE_WHZHNI）：
+#     - 旧的 luci-app-tailscale-community 依赖 +tailscale（feeds/packages/net/tailscale），
+#       而那个 tailscale 包会装 /etc/init.d/tailscale 和 /etc/config/tailscale；
+#     - 新插件自己也装这两个文件 → 同时装必然文件冲突。
+#     所以 config 里 tailscale 本体和 community 界面都已关掉，只留新插件。
+#     新插件**不带 tailscaled 二进制**。它自带的 /etc/config/tailscale 默认
+#     `option enabled '0'`（服务关闭），所以开机不会去下载；用户第一次在 LuCI
+#     里把服务打开时，init.d 发现 /usr/sbin/tailscaled 缺失，才会后台跑
+#     update.sh ensure-core 下载内核（镜像顺序 GitLab → Cloudflare R2 → GitHub），
+#     装好自动重启服务。也可以在「核心」页手动触发。
+#     ⚠ 所以第一次启用时必须能联网，否则拉不到内核；不影响路由器其他功能。
+#     默认 mode=tun（需要 kmod-tun）、accept_dns=0（不接管 DNS）、
+#     不宣告任何子网（advertise_routes 为空），这些默认值对家用是安全的。
 #   （luci-app-frpc / luci-app-zerotier 在本分支是关掉的，要开就改 config 里的 =y）
 #   保留下面几个变量只是为了「万一要换源」时有地方改，默认 false。
 ADD_HOMEProxy=false    # 换成自己的 homeproxy 源时才置 true（默认用 feeds 里的）
@@ -103,6 +115,45 @@ if [ "$ADD_AIROHA_NPU" = "true" ]; then
     mv "$PODIR/es/luci-app-airoha-npu.po" "$PODIR/es/airoha-npu.po"
   fi
   echo "   po/zh_Hans: $(ls -1 "$PODIR/zh_Hans/" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# ---------------------------------------------------------
+# tailscale 管理界面（whzhni1/luci-app-tailscale，新版 ucode 实现）
+#
+# 和 feeds 自带的 luci-app-tailscale-community 是**两套完全不同的东西**：
+#   community 版 = 纯界面，靠 +tailscale（feeds/packages/net/tailscale）提供
+#                  /usr/sbin/tailscaled + /etc/init.d/tailscale + /etc/config/tailscale
+#   whzhni1 版  = 界面 + 自己的 init.d + 自己的 config + 内核在线更新器，
+#                  **不带二进制**，首次启动时 init.d 会自动联网下载
+#
+# ⚠ 所以这两者**不能同时开**：/etc/init.d/tailscale 和 /etc/config/tailscale
+#   会撞车，构建阶段后装的静默覆盖前面的，运行期行为不可预期。
+#   config 里已经把关掉 base tailscale 包和 community 界面，只留本插件。
+#
+# 仓库是 monorepo，根下还有 .github / images / README 等，真正的包在
+# luci-app-tailscale/ 子目录，必须**展平**拷进 $PKG_DIR（理由同 gecoosac：
+# 整仓留在那里会触发脚本后方的「清理重复嵌套目录」逻辑误删内层 Makefile）。
+#
+# Makefile 用的是绝对路径 include：
+#     include $(TOPDIR)/feeds/luci/luci.mk
+# 原样保留即可，别改成 ../../luci.mk —— 那会解析到 package/luci.mk（不存在）。
+# 前提是 diy-part1.sh 在 feeds update/install 之前跑（workflow 已保证）。
+# ---------------------------------------------------------
+if [ "$ADD_TAILSCALE_WHZHNI" = "true" ]; then
+  TS_TMP="$(mktemp -d)/ts"
+  if clone https://github.com/whzhni1/luci-app-tailscale "$TS_TMP" main \
+     && [ -f "$TS_TMP/luci-app-tailscale/Makefile" ]; then
+    rm -rf "$PKG_DIR/luci-app-tailscale"
+    mv "$TS_TMP/luci-app-tailscale" "$PKG_DIR/luci-app-tailscale"
+    echo "✅ 已展平: luci-app-tailscale"
+    echo "   版本: $(grep -m1 '^PKG_VERSION' "$PKG_DIR/luci-app-tailscale/Makefile" 2>/dev/null)"
+    echo "   自带文件: $(ls -1 "$PKG_DIR/luci-app-tailscale/root/etc/config" "$PKG_DIR/luci-app-tailscale/root/etc/init.d" 2>/dev/null | tr '\n' ' ')"
+  else
+    echo "::error::luci-app-tailscale 拉取失败或仓库结构变化，defconfig 会静默剔除"
+    rm -rf "$TS_TMP"
+    exit 1
+  fi
+  rm -rf "$(dirname "$TS_TMP")"
 fi
 
 # ---------------------------------------------------------
@@ -170,6 +221,11 @@ fi
 # ---------------------------------------------------------
 if [ "$ADD_AIROHA_NPU" = "true" ] && [ ! -d "$PKG_DIR/luci-app-airoha-npu" ]; then
   echo "::error::luci-app-airoha-npu 未拉到，config 里的 =y 会被 defconfig 剔除"
+  exit 1
+fi
+
+if [ "$ADD_TAILSCALE_WHZHNI" = "true" ] && [ ! -f "$PKG_DIR/luci-app-tailscale/Makefile" ]; then
+  echo "::error::luci-app-tailscale 未拉到（或没展平），config 里的 =y 会被 defconfig 剔除"
   exit 1
 fi
 

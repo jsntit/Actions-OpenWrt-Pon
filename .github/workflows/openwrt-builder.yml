@@ -448,7 +448,10 @@ jobs:
     - name: 恢复工具链缓存
       id: tc_cache
       if: env.REUSE_TOOLCHAIN == 'true'
-      uses: actions/cache/restore@main
+      # v5 = Node 24 运行时。v4 跑在 Node 20 上，而 Node 20 已被 GitHub 弃用，
+      # 会被强制降级到 24 执行并每步打警告。本仓库统一钉 v5，不写 @main
+      # （main 已迁到 v6 的 ESM 实现，引用会漂移、不可复现）。
+      uses: actions/cache/restore@v5
       with:
         # 四块一起存：
         #   staging_dir/host      ← tools 装出来的宿主工具（ccache/gcc 包装等）
@@ -561,7 +564,7 @@ jobs:
         echo "下载缓存 key: dl-$H"
 
     - name: 缓存下载目录
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         # dl/ 里全是上游的源码 tar 包。命中时省下 make download 的 2~4 分钟
         # （实测 2.1 / 4.3 分钟），网络差的时候更值。
@@ -570,7 +573,7 @@ jobs:
         #   · 包集合由 .config 决定，config 不变就不会缺包 → 命中率高
         #   · 换插件后 .config 变了 → 自动换 key 重新下载并重建缓存
         #   · 不会像「每次 run_id」那样把缓存堆爆（10 GB 限额）
-        # 用 actions/cache@v4（单步）而不是 restore/save 分离：
+        # 用 actions/cache@v5（单步）而不是 restore/save 分离：
         # miss 时它自己会在 job 结束时存，hit 时不动，不需要额外步骤。
         path: /workdir/openwrt/dl
         key: dl-${{ steps.dlkey.outputs.hash }}
@@ -609,7 +612,7 @@ jobs:
         && steps.tc.outcome == 'success'
         && steps.tc.outputs.fingerprint != ''
         && steps.tc_cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@main
+      uses: actions/cache/save@v5
       with:
         # 与 restore 的 path / key 必须逐项一致（含 build_dir/host）
         path: |
@@ -678,11 +681,26 @@ jobs:
         retain_days: 0
         keep_minimum_runs: 2
 
+    # 原来用 dev-drprasad/delete-older-releases@master，但它的 action.yml
+    # 至今还是 `using: node20` → 每次发版都吃一条 Node 20 弃用警告。
+    # 上游长期没跟进，改成 runner 自带的 gh CLI，行为等价：
+    #   keep_latest: 3  → 只留最新 3 个
+    #   delete_tags: true → --cleanup-tag 连 tag 一起删
     - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        echo "现有 release："
+        gh release list --limit 100
+        # 落文件再 while read：管道会进子 shell；且 `[ -z "$x" ] && continue`
+        # 在 bash -e 下整条返回 1 会直接杀脚本，必须写成 if。
+        gh release list --limit 100 --json tagName,createdAt \
+          --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' > /tmp/old-tags.txt
+        while IFS= read -r tag; do
+          if [ -z "$tag" ]; then
+            continue
+          fi
+          echo "删除旧 release: $tag"
+          gh release delete "$tag" --yes --cleanup-tag || echo "警告：$tag 删除失败，跳过"
+        done < /tmp/old-tags.txt

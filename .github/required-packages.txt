@@ -1,0 +1,15 @@
+# 本分支 defconfig 之后必须为 =y 的包
+#
+# 语法：
+#   每行一个包名        → defconfig 后必须是 CONFIG_PACKAGE_<name>=y
+#   !name               → 必须**不**启用（防撞车）
+#   # 开头 / 空行        → 忽略
+#
+# 这份清单三分支各不相同，改插件时一起改这里，否则构建会在
+# 「校验关键包」步骤（defconfig 之后、编译之前）直接失败。
+#
+# main = 纯净基线，不带任何第三方插件，只有 airoha 状态页
+#        （luci-app-airoha-npu 由 diy-part1.sh 从 pbs05 仓库单独 clone）。
+#        这个分支只用来跟上游演进做对比，加包请去 for-zhangbin / for-maym。
+
+luci-app-airoha-npu

@@ -28,3 +28,25 @@ kmod-phy-airoha-en8811h
 airoha-ponctl
 airoha-pond
 luci-app-pon
+
+# ---------------------------------------------------------------
+# 无线(WiFi) + USB：同样是 DEVICE_PACKAGES 里的设备包，必须内置 =y。
+# 参照 jsntit/Actions-OpenWrt-AN758X 的「15. WiFi」「16. USB 与存储」两节。
+# 写成 =m 时 workflow 会把 PER_DEVICE_ROOTFS 置 n，include/image.mk 不合并设备包，
+# defconfig 不报错但固件里没有驱动（表现：LuCI 无「无线」菜单、USB 口不供电/不识别）。
+kmod-cfg80211
+kmod-mac80211
+kmod-mt76-core
+kmod-mt7915e
+kmod-mt7916-firmware
+wpad-openssl
+hostapd-common
+iwinfo
+wireless-regdb
+kmod-usb-core
+kmod-usb3
+kmod-usb-xhci-hcd
+kmod-usb-storage
+kmod-usb-storage-uas
+kmod-scsi-core
+block-mount

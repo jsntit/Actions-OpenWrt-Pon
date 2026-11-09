@@ -197,10 +197,30 @@ if [ "$ADD_GECOOSAC" = "true" ]; then
   GECO_TMP="$(mktemp -d)/gecoosac"
   if clone https://github.com/laipeng668/luci-app-gecoosac "$GECO_TMP" main \
      && [ -f "$GECO_TMP/gecoosac/Makefile" ] \
-     && [ -f "$GECO_TMP/luci-app-gecoosac/Makefile" ]; then
+     && [ -f "$GECO_TMP/luci-app-gecoosac/Makefile" ] \
+     && [ -f "$GECO_TMP/LICENSE" ]; then
     rm -rf "$PKG_DIR/gecoosac" "$PKG_DIR/luci-app-gecoosac"
     cp -r "$GECO_TMP/gecoosac" "$PKG_DIR/"
     cp -r "$GECO_TMP/luci-app-gecoosac" "$PKG_DIR/"
+
+    # ⚠ 展平后必须补 LICENSE，并把 Makefile 里的相对路径改掉。
+    #
+    # gecoosac/Makefile 的 Build/Prepare 有一行：
+    #     $(CP) ../LICENSE $(PKG_BUILD_DIR)/LICENSE
+    # 它假设「包目录的上一级 = monorepo 根」，那边确实有 LICENSE。
+    # 但本仓库把包展平到 package/custom/gecoosac/，上一级变成 package/custom/，
+    # 没有 LICENSE → 编译期直接 cp: cannot stat '../LICENSE' 失败
+    # （run 42564582673 实际就是这个错）。
+    #
+    # 修法：LICENSE 拷进包目录自身，并把 ../LICENSE 换成绝对定位 $(CURDIR)/LICENSE。
+    # 用 $(CURDIR) 而不是 ./LICENSE，是因为 Build/Prepare 的 cwd 依赖调用方式，
+    # CURDIR 是 make -C 进来的包目录，最不容易歧义。
+    cp -f "$GECO_TMP/LICENSE" "$PKG_DIR/gecoosac/LICENSE"
+    sed -i 's|\.\./LICENSE|$(CURDIR)/LICENSE|' "$PKG_DIR/gecoosac/Makefile"
+    if grep -q '\.\./LICENSE' "$PKG_DIR/gecoosac/Makefile"; then
+      echo "::error::gecoosac Makefile 里的 ../LICENSE 没替换成功，上游结构可能变了"
+      exit 1
+    fi
 
     echo "   gecoosac 版本: $(grep -m1 '^PKG_VERSION' "$PKG_DIR/gecoosac/Makefile" 2>/dev/null)"
     echo "   预编译二进制按 TARGET_ARCH_PACKAGES 选："

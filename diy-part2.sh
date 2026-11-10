@@ -6,8 +6,9 @@
 #
 #   1) 时区 Asia/Shanghai (CST-8)
 #   2) 默认 LAN 地址 192.168.1.1 -> 10.0.0.1（掩码沿用上游 255.255.255.0 = /24）
+#   3) failsafe 预启动网络同步为 10.0.0.1/24（不改的话进 failsafe 连不上）
 #
-# 本仓库原则：**除下面这两项，其余全部保持 ponwrt 上游默认**。
+# 本仓库原则：**除下面这三项，其余全部保持 ponwrt 上游默认**。
 #   - 不改主机名（上游 OpenWrt）
 #   - 不改主题（ponwrt 用 ImmortalWrt 的 luci feeds，默认已是 argon）
 #   - 不加固件版本后缀（保持上游 DISTRIB_DESCRIPTION 原样）
@@ -18,7 +19,7 @@
 set -euo pipefail
 
 echo "=========================================="
-echo "默认值定制：时区 + LAN 地址 (diy-part2.sh)"
+echo "默认值定制：时区 + LAN 地址 + failsafe 地址 (diy-part2.sh)"
 echo "=========================================="
 
 # ---------------------------------------------------------
@@ -62,6 +63,47 @@ if [ -f "$CFG" ]; then
   fi
 else
   echo "::warning::未找到 $CFG，跳过默认 LAN 地址修改"
+fi
+
+# ---------------------------------------------------------
+# 3. failsafe 预启动网络 -> 10.0.0.1/24
+#
+#    和上面第 2 段是**两套独立的东西**，必须一起改：
+#
+#      config_generate         → 首启生成的 /etc/config/network，正常 LAN
+#      CONFIG_TARGET_PREINIT_* → /lib/preinit/00_preinit.conf 的 pi_ip，
+#                                掉电中断启动 3 次 / 长按 reset 进的
+#                                failsafe 恢复模式用的网段
+#
+#    只改前者的话，进了 failsafe 还是 192.168.1.1，得把电脑改回 192.168.1.x
+#    才能连上 —— 而 192.168.1.x 往往正是光猫/主路由占着的网段，等于进不去。
+#
+#    pi_ip 不是静态文件：package/base-files/Makefile:93 在编译期现拼的
+#        echo 'pi_ip=$(if $(CONFIG_TARGET_PREINIT_IP),$(CONFIG_TARGET_PREINIT_IP),"192.168.1.1")'
+#    所以改 .config 就够了，**不用**动 base-files/Makefile。
+#    （README 里「还要改 base-files/Makefile 的 pi_ip」那句是多余的，已更正。）
+#
+#    本段在 make defconfig 之前执行，写进去的值会被 defconfig 保留
+#    （string 类型无依赖变化，不属于静默重算的范围）。
+# ---------------------------------------------------------
+if [ -f .config ]; then
+  sed -i 's|^CONFIG_TARGET_PREINIT_IP=.*|CONFIG_TARGET_PREINIT_IP="10.0.0.1"|' .config
+  sed -i 's|^CONFIG_TARGET_PREINIT_BROADCAST=.*|CONFIG_TARGET_PREINIT_BROADCAST="10.0.0.255"|' .config
+
+  if grep -q '^CONFIG_TARGET_PREINIT_IP="10.0.0.1"' .config; then
+    echo "✅ failsafe 预启动地址 -> 10.0.0.1/24（pi_ip / pi_broadcast）"
+  else
+    echo "::error::config 里没有 CONFIG_TARGET_PREINIT_IP，或替换失败"
+    grep -n 'CONFIG_TARGET_PREINIT' .config | sed 's/^/::error::  /' || true
+    exit 1
+  fi
+
+  # 掩码保持 /24 不动，只提示一下，免得以后有人以为漏改了
+  grep -q '^CONFIG_TARGET_PREINIT_NETMASK="255.255.255.0"' .config \
+    && echo "   （掩码沿用 255.255.255.0 = /24）" \
+    || echo "::warning::CONFIG_TARGET_PREINIT_NETMASK 不是 255.255.255.0，failsafe 网段可能不是 /24"
+else
+  echo "::warning::当前目录没有 .config，跳过 failsafe 地址修改"
 fi
 
 echo "=========================================="

@@ -73,36 +73,52 @@ soc 与 profile 必须配套，填错会在「环境自检」这一步直接报�
 | `configs/an7581.config` / `an7583.config` | 基础配置，取自 ponwrt 官方 `configs/`，编译时会收敛为单机型 |
 | `configs/release.config` | 官方发布版的额外包（BBR / cake / tproxy / wireguard 等），自动叠加 |
 | `diy-part1.sh` | feeds update 之前跑：按开关拉取额外插件并修正 po 命名 |
-| `diy-part2.sh` | 配置加载之后跑：**只改时区**，其余全部保持上游（LAN / 主机名 / 主题都不动） |
+| `diy-part2.sh` | 配置加载之后跑：改时区 + 默认 LAN / failsafe 地址，其余保持上游（主机名 / 主题不动） |
 | `.config` | 兜底配置（`configs/` 里找不到对应文件时才会用到） |
 
 ## 客制化
 
 ### 修改原则：只动必要的
 
-`diy-part2.sh` **只改时区**（`Asia/Shanghai`），其余一律保持上游：
+`diy-part2.sh` 只改下面三项，其余一律保持上游：
 
 | 项目 | 上游默认 | 本仓库 |
 |---|---|---|
 | 时区 | UTC | **Asia/Shanghai** |
-| 默认 LAN | `192.168.1.1` | 不动 |
+| 默认 LAN | `192.168.1.1` | **`10.0.0.1/24`** |
+| failsafe 预启动网络 | `192.168.1.1` | **`10.0.0.1/24`** |
 | 主机名 | `OpenWrt` | 不动 |
 | 主题 | argon（ImmortalWrt luci feeds 自带） | 不动 |
 | 固件版本后缀 | 无 | 不加 |
 
 ### 关于默认 LAN 地址
 
-**本仓库不改默认 LAN 地址，保持 ponwrt 上游的 `192.168.1.1`。**
+**本分支把默认网段改成了 `10.0.0.1/24`**（避开光猫/主路由常用的 `192.168.1.x`）。
+这一步要改**两个地方**，少改一个就会出问题：
 
-上游配置里 `CONFIG_TARGET_PREINIT_IP="192.168.1.1"`，failsafe 预启动网络也是
-同一网段。确实要换成别的网段（比如避开光猫的 `192.168.1.x`），有两条路：
+| 作用域 | 由谁决定 | 改法 |
+|---|---|---|
+| 正常 LAN（首启生成的 `/etc/config/network`） | `package/base-files/files/bin/config_generate` 的 `lan) ipad=` 行 | `diy-part2.sh` 第 2 段 sed 这一行 |
+| failsafe 恢复模式（`/lib/preinit/00_preinit.conf` 的 `pi_ip`） | `.config` 的 `CONFIG_TARGET_PREINIT_IP` / `_BROADCAST` | 三份 config 直接改值，`diy-part2.sh` 第 3 段再兜一次 |
 
-- **简单**：在 `diy-part2.sh` 里加一句
-  `sed -i 's/192.168.1.1/10.0.0.1/g' package/base-files/files/bin/config_generate`
-- **完整**：还需要同步 failsafe 的预启动网络，否则进了 failsafe 得把电脑换回
-  `192.168.1.x` 才能连上 —— 要改 `base-files/Makefile` 的 `pi_ip` /
-  `pi_broadcast` 和 `image-config.in` 里 `TARGET_PREINIT_IP` 的 Kconfig default
-  （后者不改的话，光写 `.config` 会被 defconfig 按 default 重算丢掉）。
+`pi_ip` **不是**静态文件：`package/base-files/Makefile:93` 在编译期现拼
+
+```make
+echo 'pi_ip=$(if $(CONFIG_TARGET_PREINIT_IP),$(CONFIG_TARGET_PREINIT_IP),"192.168.1.1")'
+```
+
+所以改 `.config` 就够了，**不需要**动 `base-files/Makefile`。
+
+判定固件到底改成功没有，别只看脚本输出，直接解包看实物：
+
+```bash
+# 1) 正常 LAN
+unsquashfs -c ... 后读 bin/config_generate，lan) 那行应是 10.0.0.1
+# 2) failsafe
+cat lib/preinit/00_preinit.conf    # pi_ip="10.0.0.1" / pi_broadcast="10.0.0.255"
+```
+
+注意 sysupgrade 默认保留旧配置，已刷过的机器升级后 LAN 不会变，要重新配或刷机时不保留配置。
 
 ### 加插件
 

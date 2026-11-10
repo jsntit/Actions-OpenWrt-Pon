@@ -1,0 +1,10 @@
+# failsafe（预启动恢复模式）期望 IP —— 每分支各写一份
+#
+# 只写一行 IP，格式 10.0.0.1，不要带引号或掩码。
+# openwrt-builder.yml 的「校验关键包」步骤读它，在 defconfig 之后核对
+# .config 里的 CONFIG_TARGET_PREINIT_IP；对不上就直接 fail，避免白烧两小时
+# 编完才发现刷进去 failsafe 还是老网段。
+#
+# 没有这个文件的分支 = 不做这项校验（不是错误）。
+
+10.0.0.1

@@ -502,6 +502,33 @@ jobs:
         fi
         echo "✅ 关键包校验通过:$OK"
 
+        # ---- 预启动（failsafe）地址校验 ----
+        # diy-part2.sh 在 defconfig **之前**把 CONFIG_TARGET_PREINIT_IP 写成 10.0.0.1，
+        # 但 defconfig 是「按 Kconfig 重算」的，万一它按 default 改回 192.168.1.1，
+        # 只有等编完解包才会发现（白烧两小时）。这里是编译前最后一道闸。
+        #
+        # 期望值外置到 .github/expected-lan-ip.txt，按分支各写各的：
+        # for-maym 写 10.0.0.1 —— 没有这个文件就整段跳过，不会误伤别的分支。
+        IPF="${{ github.workspace }}/.github/expected-lan-ip.txt"
+        if [ -f "$IPF" ]; then
+          WANT=$(sed -e 's/#.*//' "$IPF" | tr -d ' \t\r' | grep -v '^$' | head -1 || true)
+          GOT=$(sed -n 's/^CONFIG_TARGET_PREINIT_IP="\(.*\)"$/\1/p' .config | head -1)
+          BCAST=$(sed -n 's/^CONFIG_TARGET_PREINIT_BROADCAST="\(.*\)"$/\1/p' .config | head -1)
+          echo "预启动 IP：期望 ${WANT} / 实际 ${GOT}（broadcast ${BCAST}）"
+          if [ -z "$WANT" ]; then
+            echo "::error::$IPF 里没读到期望 IP"
+            exit 1
+          fi
+          if [ "$GOT" != "$WANT" ]; then
+            echo "::error::defconfig 之后 CONFIG_TARGET_PREINIT_IP='${GOT}'，期望 '${WANT}'"
+            echo "::error::这样刷进去 failsafe 还是老网段，进不去。检查："
+            echo "::error::  1) diy-part2.sh 第 3 段是否执行（看前面有没有「failsafe 预启动地址 ->」）"
+            echo "::error::  2) configs/*.config 与 .config 三份的 PREINIT_IP 是否都改了"
+            exit 1
+          fi
+          echo "✅ failsafe 预启动地址 = ${GOT}/24"
+        fi
+
     # =========================================================
     # 工具链缓存
     #

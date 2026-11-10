@@ -522,8 +522,11 @@ jobs:
           if [ "$GOT" != "$WANT" ]; then
             echo "::error::defconfig 之后 CONFIG_TARGET_PREINIT_IP='${GOT}'，期望 '${WANT}'"
             echo "::error::这样刷进去 failsafe 还是老网段，进不去。检查："
-            echo "::error::  1) diy-part2.sh 第 3 段是否执行（看前面有没有「failsafe 预启动地址 ->」）"
-            echo "::error::  2) configs/*.config 与 .config 三份的 PREINIT_IP 是否都改了"
+            echo "::error::  1) diy-part2.sh 第 3/3b 段是否都执行了（往上翻「failsafe 预启动地址 ->」和「image-config.in」两行）"
+            echo "::error::  2) 最常见根因：CONFIG_IMAGEOPT / CONFIG_PREINITOPT 都是 not set，"
+            echo "::error::     → TARGET_PREINIT_IP 这个符号不可见 → defconfig 按 Kconfig default 重算，"
+            echo "::error::     .config 里写什么都会被抹掉。必须改 package/base-files/image-config.in 的 default。"
+            echo "::error::  3) 只改 .config / configs/*.config 是**没用的**，别在这上面反复试"
             exit 1
           fi
           echo "✅ failsafe 预启动地址 = ${GOT}/24"

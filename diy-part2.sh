@@ -83,8 +83,20 @@ fi
 #    所以改 .config 就够了，**不用**动 base-files/Makefile。
 #    （README 里「还要改 base-files/Makefile 的 pi_ip」那句是多余的，已更正。）
 #
-#    本段在 make defconfig 之前执行，写进去的值会被 defconfig 保留
-#    （string 类型无依赖变化，不属于静默重算的范围）。
+#    ⚠ 只改 .config **不够**。上面那个符号的定义是：
+#        config TARGET_PREINIT_IP
+#          string
+#          prompt "IP address for preinit network messages" if PREINITOPT
+#          default "192.168.1.1"
+#      而本分支的 config 是 `# CONFIG_IMAGEOPT is not set` +
+#      `# CONFIG_PREINITOPT is not set` → prompt 的两个条件都不成立 →
+#      符号**不可见** → kconfig 的 defconfig 模式按 default 重算，
+#      这里写进去的 10.0.0.1 每次都被抹回 192.168.1.1。
+#      （2026-11-10 run 42756018562 就是被这道校验拦下的：
+#        「预启动 IP：期望 10.0.0.1 / 实际 192.168.1.1」。）
+#
+#      所以下面除了改 .config，还必须改 image-config.in 的 default（第 3b 段）。
+#      .config 那两行仍然保留：万一以后有人打开 PREINITOPT=y，它就是权威值。
 # ---------------------------------------------------------
 if [ -f .config ]; then
   sed -i 's|^CONFIG_TARGET_PREINIT_IP=.*|CONFIG_TARGET_PREINIT_IP="10.0.0.1"|' .config
@@ -104,6 +116,33 @@ if [ -f .config ]; then
     || echo "::warning::CONFIG_TARGET_PREINIT_NETMASK 不是 255.255.255.0，failsafe 网段可能不是 /24"
 else
   echo "::warning::当前目录没有 .config，跳过 failsafe 地址修改"
+fi
+
+
+# ---------------------------------------------------------
+# 3b. 把 PREINIT 两个符号的 Kconfig **default** 一起改掉
+#
+#     kconfig 的 defconfig 模式下，「不可见符号一律按 default 重算」，
+#     所以改 .config 是无效的，只有改 default 才能在 defconfig 之后仍然成立。
+#
+#     这两个 default 在 image-config.in 里各只有一处（已核对）：
+#       94:	default "192.168.1.1"     → TARGET_PREINIT_IP
+#      110:	default "192.168.1.255"   → TARGET_PREINIT_BROADCAST
+#     TARGET_PREINIT_NETMASK 的 default 本来就是 255.255.255.0，不用动。
+# ---------------------------------------------------------
+IMGIN="package/base-files/image-config.in"
+if [ -f "$IMGIN" ]; then
+  sed -i 's|^\([[:space:]]*default \)"192\.168\.1\.1"$|\1"10.0.0.1"|' "$IMGIN"
+  sed -i 's|^\([[:space:]]*default \)"192\.168\.1\.255"$|\1"10.0.0.255"|' "$IMGIN"
+  if grep -q 'default "10.0.0.1"' "$IMGIN" && grep -q 'default "10.0.0.255"' "$IMGIN"; then
+    echo "✅ image-config.in：PREINIT_IP / PREINIT_BROADCAST 的 default -> 10.0.0.1 / 10.0.0.255"
+  else
+    echo "::error::$IMGIN 里没找到 PREINIT 的 default，上游结构可能已变"
+    grep -n 'TARGET_PREINIT_IP\|TARGET_PREINIT_BROADCAST\|default "192\.168' "$IMGIN" | sed 's/^/::error::  /' || true
+    exit 1
+  fi
+else
+  echo "::warning::未找到 $IMGIN，跳过 PREINIT default 修改"
 fi
 
 echo "=========================================="

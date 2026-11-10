@@ -560,21 +560,46 @@ jobs:
           /workdir/openwrt/staging_dir/toolchain-*
           /workdir/openwrt/build_dir/toolchain-*
           /workdir/openwrt/build_dir/host
-        key: toolchain-v2-${{ steps.tc.outputs.fingerprint }}
-        # v2 还没建起来时，先用 v1 兜底（v1 只有 staging_dir，没有 build_dir/host）。
-        # 这样第一次构建至少不用重编工具链本身，只补一次 tools。
+        key: toolchain-v3-${{ steps.tc.outputs.fingerprint }}
+        # 兜底顺序 v2 → v1：
+        #   v2 = 内容齐（含 build_dir/host），但戳记只推到「现在」→ 命中后仍会重编
+        #   v1 = 只有 staging_dir，连 build_dir/host 都没有
+        # v3 与 v2 的内容完全一样，唯一区别是编译前会把戳记推到未来，
+        # 所以「前缀命中 v2」这一次不会重编，编完直接存成 v3；
+        # 之后三个分支都精确命中 v3，不再有任何前缀命中。
         restore-keys: |
+          toolchain-v2-${{ steps.tc.outputs.fingerprint }}
           toolchain-${{ steps.tc.outputs.fingerprint }}
 
     - name: 修正缓存恢复出来的时间戳
       # 源码是本次刚 clone 的（mtime = 现在），而缓存里的戳记 mtime 是几天前。
       # make 按「prereq 比 target 新就重编」判断，于是会认为源码更新过 → 全部重编。
       #
-      # 分两批 touch，顺序很关键：
-      #   第 1 批 普通文件（源码/对象文件）→ T1
-      #   第 2 批 戳记（stamp/、.built、.configured…）→ T2 > T1
-      # 只做一批的话，戳记有可能比同目录的源码更早，make 照样重编。
-      # 用 cache-matched-key 而不是 cache-hit：restore-keys 兜底到 v1 时
+      # 分两批 touch：
+      #   第 1 批 普通文件（源码/对象文件）      → 现在
+      #   第 2 批 戳记（stamp/、.built、.prepared…）→ 未来（now + 6h）
+      #
+      # ★ 第 2 批必须推到「未来」，不是「现在」。原因：
+      #
+      #     tools/Makefile:
+      #       $(STAGING_DIR)/.prepared: $(TMP_DIR)/.build
+      #     toolchain/Makefile:
+      #       $(curdir)//compile = $(STAGING_DIR)/.prepared $(TOOLCHAIN_DIR)/info.mk $(tools/stamp-compile)
+      #
+      #   tmp/ 不在缓存里，每次 make 都新建，tmp/.build 的 mtime = 本次构建开始时刻，
+      #   永远比 touch 到「现在」的 .prepared 新 → .prepared 规则重跑 →
+      #   $(curdir)//compile 的 prereq 变新 → 判定工具链要重编（实测 26.4 分钟）。
+      #   2026-11-10 run 42821007026 就是这样：日志里「Cache hit 1148MB」之后
+      #   照样跑了 toolchain/gcc/initial + final 共 22 分钟。
+      #
+      #   把 .prepared 推到 now+6h 之后，它永远比 tmp/.build 新，这条链就断了。
+      #   6 小时是安全余量：实测整条构建最长 3h12m（run 42821007026）。
+      #
+      # ★ 第 2 批必须用同一个**绝对**时间，不能分几次 `touch -d now+X`。
+      #   否则 .prepared 可能比 .gcc_final_installed 晚几微秒 → 又触发重编。
+      #   make 只在 prereq **严格更新** 时才重编，时间完全相同是安全的。
+      #
+      # 用 cache-matched-key 而不是 cache-hit：restore-keys 前缀命中时
       # cache-hit 是 'false'，但确实恢复了东西，也需要 touch。
       if: env.REUSE_TOOLCHAIN == 'true' && steps.tc_cache.outputs.cache-matched-key != ''
       run: |
@@ -582,29 +607,44 @@ jobs:
         DIRS="staging_dir/host build_dir/host"
         for d in staging_dir/toolchain-* build_dir/toolchain-*; do [ -d "$d" ] && DIRS="$DIRS $d"; done
 
-        echo "--- touch 前 ---"
-        ls -ld --time-style=+%F_%T $DIRS 2>/dev/null | head -5
+        FUT=$(date -d 'now + 6 hours' '+%Y-%m-%d %H:%M:%S')
+        echo "戳记统一推到: ${FUT}"
 
-        # 第 1 批：非戳记文件
+        echo "--- touch 前 ---"
+        ls -ld --time-style=+%F_%T staging_dir/host/stamp/.tools_compile_* 2>/dev/null | head -3 || true
+
+        # 第 1 批：非戳记文件 → 现在
         find $DIRS -type f \
           ! -path '*/stamp/*' ! -name '.built*' ! -name '.configured*' \
           ! -name '.prepared*' ! -name '.installed*' \
           -exec touch -h {} + 2>/dev/null || true
 
-        # 第 2 批：戳记（晚于第 1 批）
+        # 第 2 批：戳记 → 未来同一个时刻
         find $DIRS \( -path '*/stamp/*' -o -name '.built*' -o -name '.configured*' \
              -o -name '.prepared*' -o -name '.installed*' \) \
-          -exec touch -h {} + 2>/dev/null || true
+          -exec touch -h -d "$FUT" {} + 2>/dev/null || true
+
+        # staging_dir/.prepared 不在 DIRS 里（DIRS 只有 staging_dir/host/*），单独补。
+        # 它正是 tools/Makefile 里 $(STAGING_DIR)/.prepared: $(TMP_DIR)/.build 的目标。
+        for f in staging_dir/.prepared staging_dir/host/.prepared; do
+          if [ -e "$f" ]; then
+            touch -h -d "$FUT" "$f"
+            echo "✅ 已推到未来: $f"
+          else
+            echo "::warning::$f 不存在（tools 大概没编完过，tools 阶段会重跑）"
+          fi
+        done
 
         echo "--- touch 后 ---"
         ls -ld --time-style=+%F_%T staging_dir/host/stamp/.tools_compile_* 2>/dev/null | head -3 || true
+        ls -ld --time-style=+%F_%T staging_dir/.prepared 2>/dev/null || true
         echo "✅ tools 戳记: $(ls staging_dir/host/stamp/.tools_compile_* 2>/dev/null | wc -l) 个"
         echo "✅ host 编译戳记: $(find build_dir/host -name '.built' 2>/dev/null | wc -l) 个"
         echo "✅ 工具链完成戳: $(ls staging_dir/toolchain-*/stamp/.gcc_final_installed 2>/dev/null | wc -l) 个"
 
     - name: 工具链复用结果
       run: |
-        KEY="toolchain-v2-${{ steps.tc.outputs.fingerprint }}"
+        KEY="toolchain-v3-${{ steps.tc.outputs.fingerprint }}"
         MATCHED="${{ steps.tc_cache.outputs.cache-matched-key }}"
         HIT="${{ steps.tc_cache.outputs.cache-hit }}"
         TOOLS_STAMP=$(ls /workdir/openwrt/staging_dir/host/stamp/.tools_compile_* 2>/dev/null | wc -l)
@@ -696,8 +736,14 @@ jobs:
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
 
     - name: Save toolchain cache
-      # 只在「本次真的编了工具链」时才存：
-      # 命中缓存时 steps.tc_cache.outputs.cache-hit == 'true'，存了也是白存（key 已存在）
+      # 保存条件 = 「key 没有精确存在」（cache-hit != 'true'）。
+      #
+      # ★ 这一条同时覆盖了「前缀命中也要回写」，这正是 v3 迁移能落地的关键：
+      #   restore-keys 兜底到 v2/v1 时 cache-hit 是 'false' —— 虽然恢复了东西，
+      #   但那是旧版内容（戳记只推到「现在」，命中后仍会重编）。
+      #   本次编完必须存一份 v3，之后三个分支才能精确命中。
+      #   反过来说，v3 已精确存在时再存毫无意义（同 key 不可覆盖），
+      #   真要强制重建就升 v4，或者用 Toolchain Builder 的 force_rebuild。
       #
       # ⚠ 必须再要求「指纹非空」。
       #   前面的「强制目标平台与机型」一旦失败，后面的「计算工具链指纹」就是
@@ -717,7 +763,7 @@ jobs:
           /workdir/openwrt/staging_dir/toolchain-*
           /workdir/openwrt/build_dir/toolchain-*
           /workdir/openwrt/build_dir/host
-        key: toolchain-v2-${{ steps.tc.outputs.fingerprint }}
+        key: toolchain-v3-${{ steps.tc.outputs.fingerprint }}
 
     - name: Check space usage
       if: (!cancelled())

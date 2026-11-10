@@ -147,9 +147,9 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        # ⚠ 必须和 restore/save 用同一个 key 前缀（v2），
-        #   否则这条会看到旧版 v1 存在 → 判定「无需重编」→ v2 永远建不起来。
-        KEY="toolchain-v2-${{ steps.tc.outputs.fingerprint }}"
+        # ⚠ 必须和 restore/save 用同一个 key 前缀（v3），
+        #   否则这条会看到旧版缓存存在 → 判定「无需重编」→ v3 永远建不起来。
+        KEY="toolchain-v3-${{ steps.tc.outputs.fingerprint }}"
         echo "要查的 key: $KEY"
 
         if [ "$FORCE_REBUILD" = "true" ]; then
@@ -188,24 +188,50 @@ jobs:
           /workdir/openwrt/staging_dir/toolchain-*
           /workdir/openwrt/build_dir/toolchain-*
           /workdir/openwrt/build_dir/host
-        key: toolchain-v2-${{ steps.tc.outputs.fingerprint }}
-        # v1 缓存（只有 staging_dir）兜底：这样第一次建 v2 时
-        # 只需补编 tools，不用从零编 46 分钟
+        key: toolchain-v3-${{ steps.tc.outputs.fingerprint }}
+        # v2（内容齐，但戳记只推到「现在」）→ v1（只有 staging_dir）依次兜底。
+        # 前缀命中 v2 时，下面的「修正缓存时间戳」会把戳记推到未来，
+        # 于是工具链不会重编，编完直接存成 v3。
         restore-keys: |
+          toolchain-v2-${{ steps.tc.outputs.fingerprint }}
           toolchain-${{ steps.tc.outputs.fingerprint }}
 
     - name: 修正缓存时间戳
       # 源码刚 clone（mtime=现在），缓存里的戳记是几天前 → make 会判定全部要重编。
-      # 两批 touch：普通文件先，戳记后（保证戳记永远比源码新）。
+      #
+      # 第 2 批必须推到「未来」，理由与 openwrt-builder.yml 同一段注释：
+      #   tools/Makefile 的 $(STAGING_DIR)/.prepared: $(TMP_DIR)/.build
+      #   tmp/ 不在缓存里，每次 make 新建，mtime = 现在 → .prepared 被判过期 →
+      #   toolchain/compile 跟着被判过期 → 明明「缓存已存在」还是重编 26 分钟。
+      # 这里不推未来，Toolchain Builder 自己就会出现「need_build=false 但很慢」。
       if: steps.restore.outputs.cache-matched-key != ''
       run: |
         cd /workdir/openwrt
         DIRS="staging_dir/host build_dir/host"
         for d in staging_dir/toolchain-* build_dir/toolchain-*; do [ -d "$d" ] && DIRS="$DIRS $d"; done
+
+        FUT=$(date -d 'now + 6 hours' '+%Y-%m-%d %H:%M:%S')
+        echo "戳记统一推到: ${FUT}"
+
+        # 第 1 批：非戳记文件 → 现在
         find $DIRS -type f ! -path '*/stamp/*' ! -name '.built*' ! -name '.configured*' \
           ! -name '.prepared*' ! -name '.installed*' -exec touch -h {} + 2>/dev/null || true
+
+        # 第 2 批：戳记 → 未来同一个绝对时刻（不要分几次 touch，避免微秒差）
         find $DIRS \( -path '*/stamp/*' -o -name '.built*' -o -name '.configured*' \
-             -o -name '.prepared*' -o -name '.installed*' \) -exec touch -h {} + 2>/dev/null || true
+             -o -name '.prepared*' -o -name '.installed*' \) \
+          -exec touch -h -d "$FUT" {} + 2>/dev/null || true
+
+        # staging_dir/.prepared 不在 DIRS 里（DIRS 只有 staging_dir/host/*），单独补
+        for f in staging_dir/.prepared staging_dir/host/.prepared; do
+          if [ -e "$f" ]; then
+            touch -h -d "$FUT" "$f"
+            echo "✅ 已推到未来: $f"
+          else
+            echo "::warning::$f 不存在（tools 大概没编完过）"
+          fi
+        done
+
         echo "tools 戳记: $(ls staging_dir/host/stamp/.tools_compile_* 2>/dev/null | wc -l) 个"
         echo "工具链完成戳: $(ls staging_dir/toolchain-*/stamp/.gcc_final_installed 2>/dev/null | wc -l) 个"
 
@@ -253,7 +279,7 @@ jobs:
           /workdir/openwrt/staging_dir/toolchain-*
           /workdir/openwrt/build_dir/toolchain-*
           /workdir/openwrt/build_dir/host
-        key: toolchain-v2-${{ steps.tc.outputs.fingerprint }}
+        key: toolchain-v3-${{ steps.tc.outputs.fingerprint }}
 
     - name: 结果汇总
       if: always()

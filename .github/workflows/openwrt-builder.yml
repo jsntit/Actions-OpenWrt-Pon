@@ -134,6 +134,12 @@ env:
   TZ: Asia/Shanghai
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+
+# GITHUB_TOKEN 权限显式声明：本仓库默认是 read（新建仓库的 GitHub 默认值），
+# 不写这一段的话 release 上传会报 Resource not accessible by integration。
+permissions:
+  contents: write   # 建 release / 传 assets / 打 tag
+  actions: write    # 删除旧 workflow run
 jobs:
   build:
     # ponwrt 走 ImmortalWrt 主线（内核 6.18），用 24.04 而非模板默认的 22.04：

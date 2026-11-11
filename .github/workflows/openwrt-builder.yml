@@ -688,7 +688,18 @@ jobs:
         # 不用 ${{ hashFiles('openwrt/.config') }}：源码在 /workdir，
         # workspace 里只有一个符号链接，hashFiles 走软链不可靠，可能返回空串
         # → key 退化成 "dl-"，所有配置共用一个缓存。
-        H=$(md5sum /workdir/openwrt/.config | cut -c1-16)
+        #
+        # ⚠ 也不能直接 md5sum 整个 .config。
+        #   make defconfig 会给 feeds 里每个包都写一行
+        #   「# CONFIG_PACKAGE_xxx is not set」，而 feeds 每天从上游拉新、包会增删，
+        #   这一行也跟着增删 → 哈希漂移 → key 每次构建都不一样。
+        #   实测 2026-11-11：同一份 configs/*.config、只改了 workflow，
+        #   包数 2084 → 2082，key 连续三次全变，dl 缓存命中率归零，
+        #   每次都白下 4~5 分钟，还把 10 GB 配额堆满。
+        #   只取「真正生效的设置」（非注释、非空行）即可：上游增删包不影响 key，
+        #   只有自己加减包或改目标平台时才换 key。
+        H=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' /workdir/openwrt/.config \
+            | sort | md5sum | cut -c1-16)
         echo "hash=$H" >> "$GITHUB_OUTPUT"
         echo "下载缓存 key: dl-$H"
 
@@ -698,14 +709,20 @@ jobs:
         # dl/ 里全是上游的源码 tar 包。命中时省下 make download 的 2~4 分钟
         # （实测 2.1 / 4.3 分钟），网络差的时候更值。
         #
-        # key 用 .config 的内容哈希：
-        #   · 包集合由 .config 决定，config 不变就不会缺包 → 命中率高
-        #   · 换插件后 .config 变了 → 自动换 key 重新下载并重建缓存
+        # key 用「生效设置」的哈希：
+        #   · 上游 feeds 增删包（只影响注释行）不会让它变 → 命中率稳定
+        #   · 自己加减包 / 换目标 → key 变，重新下载并重建缓存
         #   · 不会像「每次 run_id」那样把缓存堆爆（10 GB 限额）
         # 用 actions/cache@v5（单步）而不是 restore/save 分离：
         # miss 时它自己会在 job 结束时存，hit 时不动，不需要额外步骤。
         path: /workdir/openwrt/dl
         key: dl-${{ steps.dlkey.outputs.hash }}
+        # 换算法后旧 key（dl-<整个 .config 的 md5>）算出来对不上。
+        # 前缀 dl- 兜底能捞到同分支最近一条旧缓存：作用域只有「当前分支 + 默认分支」，
+        # 捞到的必然是同一套配置的 dl，最多差几个包，make download 会补齐。
+        # 所以换算法不用先删缓存：第一次命中旧 key，编完自动存成新 key。
+        restore-keys: |
+          dl-
 
     - name: Download package
       id: package

@@ -728,8 +728,14 @@ jobs:
         #   每次都白下 4~5 分钟，还把 10 GB 配额堆满。
         #   只取「真正生效的设置」（非注释、非空行）即可：上游增删包不影响 key，
         #   只有自己加减包或改目标平台时才换 key。
-        H=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' /workdir/openwrt/.config \
-            | sort | md5sum | cut -c1-16)
+        # ⚠ sort 必须锁 LC_ALL=C。
+        #   C 和 C.UTF-8 排出来一样（都是字节序），但 en_US.UTF-8 会按字典序
+        #   忽略 `"` `-` `_` 等符号，同一份 config 排出来顺序不同、md5 天差地别
+        #   （本地实测 bf68a0ad vs 48e35439）。runner 镜像哪天把默认 LANG 从
+        #   C.UTF-8 改成 en_US.UTF-8，所有分支的 key 会集体漂移一次、全量重下。
+        #   锁 C 不会改变现有效果（C.UTF-8 算出的值相同），只是把这一风险焊死。
+        H=$(LC_ALL=C grep -vE '^[[:space:]]*#|^[[:space:]]*$' /workdir/openwrt/.config \
+            | LC_ALL=C sort | md5sum | cut -c1-16)
         echo "hash=$H" >> "$GITHUB_OUTPUT"
         echo "下载缓存 key: dl-$H"
 

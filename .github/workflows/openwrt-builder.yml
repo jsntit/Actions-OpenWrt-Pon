@@ -713,8 +713,14 @@ jobs:
         cd openwrt
         make download -j8
         echo "--- 小于 1KB 的残缺文件（通常是下载失败）---"
-        find dl -size -1024c -exec ls -l {} \; || true
-        find dl -size -1024c -exec rm -f {} \; || true
+        # ⚠ 必须限深 -maxdepth 1 且 -type f。
+        #   dl/ 下除了下载的源码包，还有 go-mod-cache/ —— Go 模块解压出来的源码树，
+        #   里面 internal/ util/ types/ 这类目录下大量 .go 文件只有几百字节。
+        #   不限深就会把它们全删掉，之后 Go 包（sing-box 等）报
+        #   "no required module provides package xxx"，0.58 秒就"编完"再失败。
+        #   run 42932016902 正是这么挂的：dl 缓存命中 → 恢复出完整 go-mod-cache
+        #   → 这一步把它删残 → sing-box 1.14.3 编译失败。
+        find dl -maxdepth 1 -type f -size -1024c -printf '%s\t%p\n' -exec rm -f {} + || true
 
     - name: Compile the firmware
       id: compile
